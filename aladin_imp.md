@@ -2,42 +2,48 @@
 
 ## What we have
 PREDICT-X: MQL5 EA (MT5). 6-layer confluence score 0-100. Tiers:
-MEDIUM 55-69 (limit entries), STRONG 70-84 (market only w/ momentum),
-VERY STRONG 85+ (market). One position per symbol. TP1 = 50% partial +
-breakeven, early profit lock, post-TP1 trail. Regime engine (DANGEROUS
-blocks all). Daily loss halt. User reports it works well (~98% win rate).
+MEDIUM 55-69 (limit entries), STRONG 70-84 (market w/ momentum),
+VERY STRONG 85+ (market). One position/symbol. TP1 50% partial + BE,
+early lock, post-TP1 trail, regime engine (DANGEROUS blocks all),
+daily loss halt. User reports ~98% win rate.
 
-## Goal
-"Aladdin-lite": adapt BlackRock Aladdin process (one data record,
-continuous risk view, what-if testing on own history, enforced pre-trade
-gates) to single-user level for better prediction + trade accuracy.
+## Goal (user-confirmed 2026-08-28)
+A more accurate FUTURE VIEW of the prediction. Existing trade functions
+(entries, TP1/trail, protection ladder) stay UNCHANGED. Keep it LIGHT —
+no heavy functionality.
 
-## Build plan (in order)
-1. **PX_BookOfRecord.mqh** — append-only file: full snapshot per closed
-   bar (feature vector, 6 layer scores, regime, setup) + outcome
-   backfill (SL / TP1 / TP2, MAE/MFE, P/L in R). Pure logging, no
-   trading change.
-2. **PX_PreTradeGate.mqh** — one ordered veto list, every reason logged.
-   Add: consecutive-loss breaker, max signals/day, data freshness check.
-3. **PX_StateMemory.mqh** — k-NN over book of record: for current signal,
-   find last ~50 similar setups (same symbol+TF); use P(TP1/TP2), avg MAE
-   to veto / adjust SL / shrink lot. Needs ~100-200 recorded signals.
-4. **PX_Calibration.mqh** — realized win-rate per score band, per layer,
-   per regime. DISPLAY first; auto weight tuning only slow + capped
-   (small-sample overfit risk = the dangerous one).
-5. **Position health score 0-100** recomputed per bar; bands =
-   hold / tighten / close-if-profit-protected. Protection ladder keeps
-   priority.
-6. **Daily statement file** — trades, P/L, band accuracy, veto log.
+## Plan (light version)
+A. **Memory**
+  A1: live log — each live signal + setup -> small file; outcome
+      (SL/TP1/TP2, P/L in R) filled in later. Pure logging.
+  A2: history rehearsal — on first run, run the SAME scoring on MT5's
+      own past bars (same symbol+TF; history is available on chart)
+      -> bank of past setups + real outcomes (OHLC-based).
+      Approximations: typical spread constant (no historical spread);
+      same-bar SL+TP touch -> count SL first (conservative).
+B. **Future view (the deliverable)**
+  B1: live signal -> k-NN over bank -> panel line:
+      "Similar 50 | Win 68% | TP1 82% | typical dip 0.7 ATR".
+      Display-only by default.
+  B2 (own input, default OFF, same override style as existing risk
+      inputs): act on it — veto if similar win-rate < X; shrink lot /
+      widen SL when typical dip > planned SL distance.
+C. **Simple scorecard (display only)**
+  Panel: last-30-signal win rate per tier + AI bonus on/off.
+  Data decides AI's worth in 2-3 months. NO auto weight tuning.
+
+## Cut (user: "not so heavy")
+- Position health score — cut
+- Auto weight calibration — cut (display only)
+- Daily statement — reduced to the memory file itself
+- Pre-trade gate — not a subsystem; only B2-style simple inputs
 
 ## Rules
-- Single symbol, single position. Native MQL5 only, no external APIs.
-- Every new feature: own input switch, default OFF, run in shadow mode
-  (log only) before it may act. Current EA works — changes must be
-  additive and safe.
-- Do NOT remove Phase-3 online AI now. Feed it the book of record; let
-  calibration data (2-3 months) decide if it keeps its 10 bonus points.
-  Off switch already exists: InpEnableAIEnhancement.
+- Single symbol, single position. Native MQL5. No external APIs.
+- Every new feature: own input, default OFF, display before acting.
+- Keep Phase-3 online AI; scorecard decides later
+  (switch: InpEnableAIEnhancement).
+- Working EA — additive changes only.
 
 ## Status
-- Note created 2026-08-28. Implementation not started.
+- Note updated 2026-08-28 (light plan). Implementation not started.
