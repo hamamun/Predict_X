@@ -23,8 +23,17 @@ functions unchanged. Keep it LIGHT — no heavy functionality.
     (need min similar count, e.g. 30; threshold e.g. 45%).
   * RESIZE — default OFF. Widen SL if typical dip > planned SL;
     halve lot if win-rate lukewarm (45-55%).
-- It can only say "no" or "less" — never "yes/bigger". Every action
-  logged to the memory file with reason.
+  * GO     — default OFF. "Go ahead" power:
+    GO-A: limit -> market entry when similar setups show strong
+      continuation (high TP1-rate, small typical dip) — take the
+      trade now instead of waiting at the limit level.
+    GO-B: extend pending expiry (3 bars -> N) when similar setups
+      usually need more time to play out.
+- Line it can never cross: the 6-layer score still decides IF a
+  trade exists (score < minScore = no trade, memory cannot invent
+  one). GO changes TIMING only, never lot size beyond the risk plan.
+- It can say "no", "less", or "faster" — never "new trade" or
+  "bigger". Every action logged to the memory file with reason.
 
 ## Integration point (exact)
 PREDICT-X.mq5 -> PX_OnNewClosedBar(): BETWEEN lifecycle update
@@ -48,7 +57,7 @@ A. Memory file (append-only, native MQL5 files):
       doubles as a past test of the current EA logic.
 B. PX_FutureViewCheck(): k-NN (top ~50 similar by feature distance)
    over the bank -> the numbers -> SHOW panel line.
-C. REFUSE / RESIZE inputs (default OFF), actions logged.
+C. REFUSE / RESIZE / GO inputs (default OFF), actions logged.
 D. Tiny scorecard (display only): last-30 win-rate per tier +
    whether AI bonus was on. Lets data decide Phase-3 AI's worth
    in 2-3 months. NO auto weight tuning.
@@ -64,5 +73,5 @@ Every new feature: own input, default OFF, display before acting.
 Keep Phase-3 online AI (switch: InpEnableAIEnhancement).
 
 ## Status
-Note v3, 2026-08-28. Implementation not started. Start with A
+Note v4, 2026-08-28. Implementation not started. Start with A
 (memory + rehearsal + SHOW line only).
