@@ -102,6 +102,37 @@ void PXM_ResetView(PXM_View &v)
 }
 
 //+------------------------------------------------------------------+
+//| Plain-language FUTURE VIEW status for the main panel (item 9).   |
+//| Tells the user what condition the memory view is in right now.   |
+//| Show-only; never changes a trade.                                |
+//+------------------------------------------------------------------+
+string PXM_FutureViewStatus(const double atr,const double entry,const double sl)
+{
+   if(!InpPXM_Enable) return "Future view is off.";
+   if(!InpPXM_ShowFutureView) return "Future view display off.";
+   if(g_pxmRhActive)
+   {
+      int pct=(g_pxmRhTotal>0?(int)MathRound(100.0*g_pxmRhDone/(double)g_pxmRhTotal):0);
+      return "Learning - building history ("+IntegerToString(pct)+"% / "+IntegerToString(g_pxmCount)+" setups).";
+   }
+   if(g_pxmResolved<InpPXM_MinSamples)
+      return "Learning - needs "+IntegerToString(InpPXM_MinSamples)+" similar outcomes before it gives a view.";
+   if(g_pxmView.n<=0)
+      return "No similar setups found for this signal yet.";
+
+   string txt=StringFormat("Confident - similar %d won %d of 100.",g_pxmView.n,(int)MathRound(g_pxmView.winPct));
+   if(atr>0.0 && entry>0.0 && sl>0.0 && MathAbs(entry-sl)>0.0)
+   {
+      double slATR=MathAbs(entry-sl)/atr;
+      if(g_pxmView.maeATR>slATR)
+         txt+="  Caution: dips past stop.";
+      else
+         txt+="  Usual dip fits the stop.";
+   }
+   return txt;
+}
+
+//+------------------------------------------------------------------+
 //| Keys / file names                                                 |
 //+------------------------------------------------------------------+
 string PXM_GV(const string suffix)
