@@ -139,7 +139,7 @@ void PX_RenderDetail(int &y,const PX_ScoreDetail &d)
    y+=6;
 }
 
-void PX_RenderPanel(bool showPanel,string symbol,ENUM_TIMEFRAMES tf,const PX_RegimeState &reg,const PX_ScoreDetail &l1,const PX_ScoreDetail &l2,const PX_ScoreDetail &l3,const PX_ScoreDetail &l4,const PX_ScoreDetail &l5,const PX_ScoreDetail &l6,const PX_ScoreResult &sr,const PX_TradeSetup &ts,const PX_ValueContext &vc,const PX_TrendContext &tc,const PX_Lifecycle &lc,string warning,int signalsToday,int wins,int losses,int streak,const bool autoTradingOn,const string &togglesRest,const string &fvStatus,const string &summary,const string &lastAction,const string &lastActionTime)
+void PX_RenderPanel(bool showPanel,string symbol,ENUM_TIMEFRAMES tf,const PX_RegimeState &reg,const PX_ScoreDetail &l1,const PX_ScoreDetail &l2,const PX_ScoreDetail &l3,const PX_ScoreDetail &l4,const PX_ScoreDetail &l5,const PX_ScoreDetail &l6,const PX_ScoreResult &sr,const PX_TradeSetup &ts,const PX_ValueContext &vc,const PX_TrendContext &tc,const PX_Lifecycle &lc,string warning,int signalsToday,int wins,int losses,int streak,const bool autoTradingOn,const string togglesRest,const string fvStatus,const string summary,const string lastAction,const string lastActionTime)
 {
    PX_DeletePanelObjects();
    if(!showPanel) return;
