@@ -8,6 +8,22 @@
 
 string PX_OBJ_PREFIX="PX_";
 
+// The timeframe the EA engine is designed to run on. If the chart timeframe
+// differs, the top-right chip warns the user which timeframe to attach to.
+// (M5/M15/M30 are natively supported by PX_LoadPreset; this is the "working" one.)
+#define PXM_WORKING_TF PERIOD_M30
+
+string PX_TFCompatText(ENUM_TIMEFRAMES tf,color &clrOut)
+{
+   if(tf==PERIOD_M5 || tf==PERIOD_M15 || tf==PERIOD_M30)
+   {
+      clrOut=clrLime;
+      return "TF "+PX_TFToString(tf)+" · COMPATIBLE";
+   }
+   clrOut=clrOrange;
+   return "EA "+PX_TFToString(PXM_WORKING_TF)+" · chart "+PX_TFToString(tf);
+}
+
 void PX_DeleteObjects()
 {
    for(int i=ObjectsTotal(0)-1;i>=0;i--)
@@ -32,6 +48,11 @@ void PX_DeletePanelObjects()
       string name=ObjectName(0,i);
       if(PX_IsPanelObject(name)) ObjectDelete(0,name);
    }
+}
+
+int PX_Pct(const int pts,const int max)
+{
+   return (max>0 ? (int)MathRound((double)pts/max*100.0) : 0);
 }
 
 string PX_WrapTooltip(string text,int width=58)
@@ -118,53 +139,112 @@ void PX_RenderDetail(int &y,const PX_ScoreDetail &d)
    y+=6;
 }
 
-void PX_RenderPanel(bool showPanel,string symbol,ENUM_TIMEFRAMES tf,const PX_RegimeState &reg,const PX_ScoreDetail &l1,const PX_ScoreDetail &l2,const PX_ScoreDetail &l3,const PX_ScoreDetail &l4,const PX_ScoreDetail &l5,const PX_ScoreDetail &l6,const PX_ScoreResult &sr,const PX_TradeSetup &ts,const PX_ValueContext &vc,const PX_TrendContext &tc,const PX_Lifecycle &lc,string warning,int signalsToday,int wins,int losses,int streak)
+void PX_RenderPanel(bool showPanel,string symbol,ENUM_TIMEFRAMES tf,const PX_RegimeState &reg,const PX_ScoreDetail &l1,const PX_ScoreDetail &l2,const PX_ScoreDetail &l3,const PX_ScoreDetail &l4,const PX_ScoreDetail &l5,const PX_ScoreDetail &l6,const PX_ScoreResult &sr,const PX_TradeSetup &ts,const PX_ValueContext &vc,const PX_TrendContext &tc,const PX_Lifecycle &lc,string warning,int signalsToday,int wins,int losses,int streak,const bool autoTradingOn,const string &togglesRest,const string &fvStatus,const string &summary,const string &lastAction,const string &lastActionTime)
 {
    PX_DeletePanelObjects();
    if(!showPanel) return;
-   PX_Rect("PANEL_BG",5,18,455,735,(color)0x101010,clrDimGray,"Main prediction/scoring panel. Trade setup and execution details are shown in the secondary panel.");
-   int y=30;
-   PX_Label("TITLE",16,y,"PREDICT-X v3.0        "+symbol+" | "+PX_TFToString(tf),clrAqua,11,"Segoe UI"); y+=19;
-   PX_Label("RULE",16,y,"------------------------------------------------",clrDimGray,10); y+=18;
-   if(warning!="") { PX_Label("WARN",16,y,"WARNING: "+warning,clrOrange,9); y+=18; }
 
-   PX_Label("MRH",16,y,"-- MARKET REGIME -----------------------------",clrWhite,10,"Segoe UI"); y+=17;
-   PX_Label("MR1",16,y,"REGIME: "+reg.name,reg.clr,10); y+=18;
-   PX_Label("MR2",16,y,StringFormat("ER: %.2f | ATR Ratio: %.2f | ADX: %.1f",reg.er,reg.atrRatio,reg.adx),clrSilver,10); y+=18;
-   PX_Label("MR3",16,y,"Adjustments: "+reg.adjustments,clrSilver,9); y+=19;
+   // ---- Full panel background (height fits every section with comfortable margin) ----
+   PX_Rect("PANEL_BG",5,18,455,462,(color)0x101010,clrDimGray,"PREDICT-X main decision panel.");
 
-   PX_Label("TOTAL1",16,y,"================================================",clrDimGray,10); y+=16;
-   PX_Label("TOTAL2",16,y,StringFormat("TOTAL SCORE    %3d/100 [%s]",sr.total,PX_Bar(sr.total,100,20)),(sr.total>=70?clrLime:(sr.total>=55?clrGold:clrSilver)),11); y+=19;
-   PX_Label("TOTAL3",16,y,"================================================",clrDimGray,10); y+=18;
+   // ---- Header band: title + symbol + timeframe compatibility chip (top-right) ----
+   PX_Rect("HDR_BG",5,18,455,26,(color)0x141414,clrDimGray,"PREDICT-X header: title, symbol and timeframe compatibility.");
+   PX_Label("HDR_TITLE",14,23,"PREDICT-X v3.0",clrAqua,11,"Segoe UI");
+   PX_Label("HDR_SYMBOL",150,23,symbol,clrWhite,12,"Segoe UI");
+   color tfClr; string tfChip=PX_TFCompatText(tf,tfClr);
+   PX_Label("HDR_TFCOMP",290,23,tfChip,tfClr,9,"Consolas","Timeframe compatibility mode. If the chart timeframe is not one the EA runs on natively, it shows the EA's working timeframe so you know which timeframe to attach it to.");
 
-   string sigLine="SIGNAL: NO TRADE";
-   color sigColor=clrSilver;
+   int y=52;
+
+   // ---- Core toggle statuses (only the ones that matter) ----
+   PX_Label("TOG_AUTO",14,y,"AUTO TRADE "+(autoTradingOn?"ON":"OFF"),(autoTradingOn?clrLime:clrTomato),10,"Segoe UI","Master switch. When ON the EA may place and manage trades automatically.");
+   PX_Label("TOG_REST",150,y,togglesRest,clrSilver,9,"Consolas","Core protection/display switches.");
+   y+=20;
+
+   // ---- Market regime (name + the metrics you asked to keep) ----
+   PX_Label("MRH",14,y,"-- MARKET REGIME -------------------------",clrWhite,10,"Segoe UI"); y+=17;
+   PX_Label("MR1",14,y,"MARKET:  "+reg.name,reg.clr,11); y+=18;
+   PX_Label("MR2",14,y,StringFormat("ADX %.1f   |   ER %.2f   |   ATR ratio %.2f",reg.adx,reg.er,reg.atrRatio),clrSilver,9,"Consolas","ADX = trend strength, ER = efficiency, ATR ratio = volatility. Higher ADX + efficient = cleaner trend.");
+   y+=20;
+
+   // ---- Score (medium loud) ----
+   PX_Label("SCR_TOP",14,y,"===============================================",clrDimGray,10); y+=14;
+   color scoreClr=(sr.total>=85?clrLime:(sr.total>=70?clrLime:(sr.total>=55?clrGold:(sr.total>=40?clrOrange:clrSilver))));
+   PX_Label("SCORE",14,y,StringFormat("SCORE  %3d / 100  ·  %s",sr.total,PX_TierText(sr.tier)),scoreClr,12,"Segoe UI","Combined 0-100 confidence. Higher = cleaner setup.");
+   y+=18;
+   PX_Label("SCR_BOT",14,y,"===============================================",clrDimGray,10); y+=18;
+
+   // ---- Signal (loud) + plain "Why" ----
+   string sigLine="WATCH";
+   color sigClr=clrSilver;
    if(sr.tier>=PX_TIER_MEDIUM && sr.dir!=PX_DIR_NONE)
    {
-      string arrow=(sr.dir==PX_DIR_BUY?"UP":"DOWN");
-      sigLine="SIGNAL: "+arrow+" "+PX_TierText(sr.tier)+" "+PX_DirectionText(sr.dir);
-      sigColor=(sr.dir==PX_DIR_BUY?clrLime:clrTomato);
+      sigLine=PX_DirectionText(sr.dir)+"  ·  "+PX_TierText(sr.tier);
+      sigClr=(sr.dir==PX_DIR_BUY?clrLime:clrTomato);
    }
-   PX_Label("SIGNAL",16,y,sigLine,sigColor,11); y+=21;
+   PX_Label("SIGNAL",14,y,sigLine,sigClr,14,"Segoe UI","The loud decision line: what the engine currently recommends.");
+   y+=24;
 
-   PX_RenderDetail(y,l1);
-   PX_RenderDetail(y,l2);
-   PX_RenderDetail(y,l3);
-   PX_RenderDetail(y,l4);
-   PX_RenderDetail(y,l5);
-   PX_RenderDetail(y,l6);
-   PX_Label("CANDLE",16,y,StringFormat("CANDLE CONFIRM  +%d/5",sr.candleBonus),(sr.candleBonus>0?clrGold:clrSilver),10,"Consolas","Candlestick confirmation bonus. Supports scoring only; never subtracts points."); y+=18;
+   string why="";
+   if(sr.dir!=PX_DIR_NONE)
+   {
+      bool buy=(sr.dir==PX_DIR_BUY);
+      bool stAgree=(buy && tc.stDir>0)||(!buy && tc.stDir<0);
+      bool vwAgree=(buy && vc.price>vc.vwap)||(!buy && vc.price<vc.vwap);
+      string driver=(stAgree && vwAgree)?"trend and value agree":(stAgree?"the trend agrees":(vwAgree?"price is on the value side":"momentum-led"));
+      why="Why: leaning "+(buy?"up":"down")+" - "+driver+".";
+   }
+   else
+      why=(reg.blockSignals?"Why: market unsafe - waiting.":(vc.spreadBlocked?"Why: costs too high - waiting.":"Why: no strong setup yet."));
+   PX_Label("WHY",14,y,why,clrSilver,10,"Consolas","Short plain-language reason for the current state.");
+   y+=24;
 
-   int digs=(int)SymbolInfoInteger(symbol,SYMBOL_DIGITS);
-   PX_Label("MCH",16,y,"-- MARKET CONTEXT ----------------------------",clrWhite,10,"Segoe UI"); y+=17;
-   PX_Label("MC1",16,y,StringFormat("SESSION: %s | SPREAD: %.1f pts",vc.sessionName,vc.spreadPoints),clrSilver,10); y+=17;
-   PX_Label("MC2",16,y,StringFormat("VWAP: %.*f | ATR: %.1f pts",digs,vc.vwap,vc.atr/_Point),clrSilver,10); y+=17;
-   PX_Label("MC3",16,y,StringFormat("ST: %s | SQZ: %s | ADX: %.1f",(tc.stDir>0?"GREEN":(tc.stDir<0?"RED":"FLAT")),(tc.ttmSqueeze>0.5?"ACTIVE":"FIRED"),tc.adx),clrSilver,10); y+=18;
+   // ---- Six sub-scores, two lines, xx/xx (xx%) ----
+   PX_Label("SUB_H",14,y,"-- LAYER SCORES --------------------------",clrWhite,9,"Segoe UI"); y+=15;
+   string s1=StringFormat("L1 %2d/%2d (%3d%%)   L2 %2d/%2d (%3d%%)   L3 %2d/%2d (%3d%%)",
+      l1.points,l1.maxPoints,PX_Pct(l1.points,l1.maxPoints),
+      l2.points,l2.maxPoints,PX_Pct(l2.points,l2.maxPoints),
+      l3.points,l3.maxPoints,PX_Pct(l3.points,l3.maxPoints));
+   PX_Label("SUB_L1",14,y,s1,clrSilver,9,"Consolas",PX_LayerTooltip(l1.title)+"  |  "+PX_LayerTooltip(l2.title)+"  |  "+PX_LayerTooltip(l3.title));
+   y+=15;
+   string s2=StringFormat("L4 %2d/%2d (%3d%%)   L5 %2d/%2d (%3d%%)   L6 %2d/%2d (%3d%%)",
+      l4.points,l4.maxPoints,PX_Pct(l4.points,l4.maxPoints),
+      l5.points,l5.maxPoints,PX_Pct(l5.points,l5.maxPoints),
+      l6.points,l6.maxPoints,PX_Pct(l6.points,l6.maxPoints));
+   PX_Label("SUB_L2",14,y,s2,clrSilver,9,"Consolas",PX_LayerTooltip(l4.title)+"  |  "+PX_LayerTooltip(l5.title)+"  |  "+PX_LayerTooltip(l6.title));
+   y+=18;
 
-   PX_Label("SSH",16,y,"-- SIGNAL STATE ------------------------------",clrWhite,10,"Segoe UI"); y+=17;
-   PX_Label("SS1",16,y,StringFormat("STATE: %s | BARS WAITING: %d/%d",PX_StateText(lc.state),lc.barsWaiting,reg.adjusted.signalExpiryBars),clrSilver,10); y+=17;
-   PX_Label("SS2",16,y,StringFormat("SIGNALS TODAY: %d | WIN: %d | LOSS: %d",signalsToday,wins,losses),clrSilver,9); y+=18;
-   PX_Label("PHASE",16,y,"Auto-trading only if master switch is ON.",clrOrange,8);
+   // ---- Session / spread / market open-or-closed ----
+   PX_Label("CTX",14,y,"===============================================",clrDimGray,10); y+=14;
+   string ctx=StringFormat("Session %s   ·   Spread %.0f pts   ·   Market %s",vc.sessionName,vc.spreadPoints,(vc.tickValid?"OPEN":"CLOSED"));
+   PX_Label("CTX1",14,y,ctx,clrSilver,10,"Consolas","Current session, spread and whether the market is live.");
+   y+=16;
+   if(warning!="")
+   {
+      string w=warning;
+      if(StringLen(w)>82) w=StringSubstr(w,0,80)+"...";
+      PX_Label("WARN",14,y,w,clrOrange,9,"Consolas","Setup warning (often a timeframe/indicator note).");
+      y+=16;
+   }
+   y+=4;
+
+   // ---- Future view status (simple language) ----
+   PX_Label("FV_H",14,y,"-- FUTURE VIEW ----------------------------",clrAqua,10,"Segoe UI"); y+=15;
+   PX_Label("FV1",14,y,fvStatus,clrSilver,9,"Consolas","How similar past setups on this symbol+TF ended. Show-only - never changes a trade.");
+   y+=20;
+
+   // ---- Summary (why / what / how) ----
+   PX_Label("SUM_H",14,y,"-- SUMMARY -------------------------------",clrWhite,10,"Segoe UI"); y+=15;
+   PX_Label("SUM1",14,y,summary,clrGold,9,"Consolas","Plain-language explanation of what the engine sees and why.");
+   y+=32;
+
+   // ---- Last action (real time) ----
+   PX_Label("ACT_H",14,y,"-- LAST ACTION ---------------------------",clrWhite,10,"Segoe UI"); y+=15;
+   PX_Label("ACT1",14,y,StringFormat("%s   %s",lastActionTime,lastAction),clrSilver,10,"Consolas","The most recent action the engine took, with a live timestamp.");
+   y+=18;
+
+   // ---- Today's summary line (small) ----
+   PX_Label("TODAY",14,y,StringFormat("Today: %d signal%s | %d win | %d loss",signalsToday,(signalsToday==1?"":"s"),wins,losses),clrDimGray,9,"Consolas","Today's signal/win/loss counts.");
 }
 
 void PX_DrawRegimeBar(const PX_RegimeState &reg)

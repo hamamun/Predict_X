@@ -116,6 +116,12 @@ string PX_IndicatorPath(string file)
    return "PREDICT-X\\Indicators\\"+file;
 }
 
+string PX_ShortTime(const datetime t)
+{
+   MqlDateTime dt; TimeToStruct(t,dt);
+   return StringFormat("%02d:%02d:%02d",dt.hour,dt.min,dt.sec);
+}
+
 bool PX_CreateHandles(const PX_Preset &p)
 {
    g_hST=iCustom(_Symbol,_Period,PX_IndicatorPath("SuperTrend"),p.stPeriod,p.stMultiplier);
@@ -424,6 +430,41 @@ void PX_CalculateScores()
    g_score.signalText=PX_TierText(g_score.tier)+" "+PX_DirectionText(g_score.dir);
 }
 
+//+------------------------------------------------------------------+
+//| Plain-language summary (why / what / how) for the main panel.    |
+//| Built from the live context states. Show-only, continuous.       |
+//+------------------------------------------------------------------+
+string PX_BuildSummaryText()
+{
+   // WHY NOT / what's blocking
+   if(g_regime.blockSignals)
+      return "Watching only - the market is "+g_regime.name+". No trades right now.";
+   if(g_value.spreadBlocked)
+      return "Watching only - trading costs too high (spread over 2x normal).";
+   if(g_score.dir==PX_DIR_NONE)
+      return "Scanning - no clear direction yet.";
+   if(g_score.tier<PX_TIER_MEDIUM)
+      return StringFormat("Scanning - score %d/100 is below the trade threshold.",g_score.total);
+
+   // ACTIVE
+   if(g_lifecycle.state==PX_STATE_ACTIVE)
+      return StringFormat("In a %s trade now. %s.",PX_DirectionText(g_score.dir),PX_StateText(g_lifecycle.state));
+
+   // PENDING / actionable
+   if(g_lifecycle.state==PX_STATE_PENDING)
+   {
+      string dirs=PX_DirectionText(g_score.dir);
+      string how=(g_setup.valid && g_setup.methodText!="none"?PX_TM_ShortMethod(g_setup.methodText):"waiting for a safer entry");
+      string fv=(g_pxmView.ready ? (g_pxmView.winPct>=55.0?"Future View supports it":"Future View is cautious") : "Future View is still learning");
+      return StringFormat("A %s %s (%d/100) is forming.\nEntry: %s. %s.",
+            PX_TierText(g_score.tier),dirs,g_score.total,how,fv);
+   }
+
+   // Fallback: strong score but no live setup yet (between signals / just expired).
+   return StringFormat("%s %s (%d/100) - no live setup yet, waiting for a fresh signal.",
+            PX_TierText(g_score.tier),PX_DirectionText(g_score.dir),g_score.total);
+}
+
 void PX_OnNewClosedBar()
 {
    PX_ResetDailyCountersIfNeeded();
@@ -482,12 +523,11 @@ void PX_OnNewClosedBar()
       PX_DeleteProjectionLines();
 
    PX_DrawRegimeBar(g_regime);
-   PX_RenderPanel(InpShowPanel,_Symbol,_Period,g_regime,g_d1,g_d2,g_d3,g_d4,g_d5,g_d6,g_score,g_setup,g_value,g_trend,g_lifecycle,g_basePreset.warning,g_signalsToday,g_winsToday,g_lossesToday,0);
+   // Standard-interface left panel: plain-language summary + future view + last action.
+   string toggRest=StringFormat("SL %s  ·  FUTURE VIEW %s  ·  DAILY %s",(InpUseInitialStopLoss?"ON":"OFF"),(InpPXM_ShowFutureView?"ON":"OFF"),(InpApplyDailyLossLimit?"ON":"OFF"));
+   string fvStatus=PXM_FutureViewStatus(g_value.atr,(g_setup.valid?g_setup.entry:0.0),(g_setup.valid?g_setup.sl:0.0));
+   PX_RenderPanel(InpShowPanel,_Symbol,_Period,g_regime,g_d1,g_d2,g_d3,g_d4,g_d5,g_d6,g_score,g_setup,g_value,g_trend,g_lifecycle,g_basePreset.warning,g_signalsToday,g_winsToday,g_lossesToday,0,InpEnableAutoTrading,toggRest,fvStatus,PX_BuildSummaryText(),PX_TM_ShortAction(g_tm.lastAction),PX_ShortTime(g_tm.lastActionTime));
    PX_TM_RenderOrderPanel(g_tm,InpShowPanel,g_setup,g_score,g_lifecycle);
-   // ALADDIN-IMP display blocks (each a movable block-function; reposition by
-   // editing the x/y here when the planned full layout pass happens).
-   if(InpShowPanel)
-      PXM_DrawFutureViewStack(5,757,g_value.atr,(g_setup.valid?g_setup.entry:0.0),(g_setup.valid?g_setup.sl:0.0));
    ChartRedraw(0);
 }
 
@@ -598,13 +638,12 @@ void OnTimer()
    // ALADDIN-IMP: chunked rehearsal pump (history building; never touches live state).
    PXM_RehearsePump(g_hST,g_hRSI,g_hADX,g_hATR14,g_hATR100,g_hKC,g_hTTM,g_basePreset);
    PX_DrawRegimeBar(g_regime);
-   PX_RenderPanel(InpShowPanel,_Symbol,_Period,g_regime,g_d1,g_d2,g_d3,g_d4,g_d5,g_d6,g_score,g_setup,g_value,g_trend,g_lifecycle,g_basePreset.warning,g_signalsToday,g_winsToday,g_lossesToday,0);
+   string toggRest=StringFormat("SL %s  ·  FUTURE VIEW %s  ·  DAILY %s",(InpUseInitialStopLoss?"ON":"OFF"),(InpPXM_ShowFutureView?"ON":"OFF"),(InpApplyDailyLossLimit?"ON":"OFF"));
+   string fvStatus=PXM_FutureViewStatus(g_value.atr,(g_setup.valid?g_setup.entry:0.0),(g_setup.valid?g_setup.sl:0.0));
+   PX_RenderPanel(InpShowPanel,_Symbol,_Period,g_regime,g_d1,g_d2,g_d3,g_d4,g_d5,g_d6,g_score,g_setup,g_value,g_trend,g_lifecycle,g_basePreset.warning,g_signalsToday,g_winsToday,g_lossesToday,0,InpEnableAutoTrading,toggRest,fvStatus,PX_BuildSummaryText(),PX_TM_ShortAction(g_tm.lastAction),PX_ShortTime(g_tm.lastActionTime));
    PX_TM_RenderOrderPanel(g_tm,InpShowPanel,g_setup,g_score,g_lifecycle);
    if(InpShowPanel)
-   {
-      PXM_DrawFutureViewStack(5,757,g_value.atr,(g_setup.valid?g_setup.entry:0.0),(g_setup.valid?g_setup.sl:0.0));
       ChartRedraw(0);
-   }
 }
 
 void OnTradeTransaction(const MqlTradeTransaction &trans,const MqlTradeRequest &request,const MqlTradeResult &result)
