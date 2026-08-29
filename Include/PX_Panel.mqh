@@ -341,18 +341,53 @@ void PX_RenderPanel(bool showPanel,string symbol,ENUM_TIMEFRAMES tf,const PX_Reg
    PX_Label("SCR_BOT",14,y,"===============================================",clrDimGray,10); y+=18;
 
    // ---- Signal (loud) + plain "Why" ----
+   // Display only, but now driven by the SAME gate the engine uses instead of
+   // the fixed MEDIUM tier (55): g_regime.adjusted.minScore (55 base, 60 on M5,
+   // regime-tuned -5/+5/+10) plus the live signal state. A live/armed signal
+   // keeps its direction here until it expires or flips, so this line can no
+   // longer say WATCH while the order manager panel says BUY.
+   int gate=(reg.adjusted.minScore>0?reg.adjusted.minScore:55);
+   int expBars=(reg.adjusted.signalExpiryBars>0?reg.adjusted.signalExpiryBars:3);
    string sigLine="WATCH";
    color sigClr=clrSilver;
-   if(sr.tier>=PX_TIER_MEDIUM && sr.dir!=PX_DIR_NONE)
+   if(lc.state==PX_STATE_ACTIVE || lc.state==PX_STATE_PENDING)
    {
-      sigLine=PX_DirectionText(sr.dir)+"  ·  "+PX_TierText(sr.tier);
-      sigClr=(sr.dir==PX_DIR_BUY?clrLime:clrTomato);
+      // A live/armed signal owns its direction (lc.pendingDir); the current bar's
+      // lean may already have faded or flipped, so it is only a footnote.
+      PX_Direction liveDir=(lc.pendingDir!=PX_DIR_NONE?lc.pendingDir:sr.dir);
+      string stateTag=(lc.state==PX_STATE_ACTIVE?"IN TRADE":StringFormat("LIVE %d/%d",lc.barsWaiting,expBars));
+      string head=(liveDir!=PX_DIR_NONE?PX_DirectionText(liveDir)+"  ·  ":"");
+      string leanTag=(liveDir!=PX_DIR_NONE && sr.dir!=PX_DIR_NONE && sr.dir!=liveDir?"  ·  lean "+PX_DirectionText(sr.dir):"");
+      sigLine=head+stateTag+leanTag;
+      sigClr=(liveDir==PX_DIR_BUY?clrLime:(liveDir==PX_DIR_SELL?clrTomato:clrSilver));
    }
-   PX_Label("SIGNAL",14,y,sigLine,sigClr,14,"Segoe UI","The loud decision line: what the engine currently recommends.");
+   else if(sr.dir!=PX_DIR_NONE)
+   {
+      if(reg.blockSignals)
+         sigLine="BLOCKED  ·  "+reg.name;
+      else if(vc.spreadBlocked)
+         sigLine="BLOCKED  ·  spread too high";
+      else if(sr.total>=gate)
+      {
+         sigLine=PX_DirectionText(sr.dir)+"  ·  "+PX_TierText(sr.tier);
+         sigClr=(sr.dir==PX_DIR_BUY?clrLime:clrTomato);
+      }
+      else
+         sigLine=StringFormat("WATCH  ·  score %d < %d",sr.total,gate);
+   }
+   PX_Label("SIGNAL",14,y,sigLine,sigClr,14,"Segoe UI","The loud decision line. It uses the engine's own gate, not a fixed threshold: the score must reach the regime-adjusted minimum (currently "+IntegerToString(gate)+"), the market must not be blocked, and a signal already armed stays live for "+IntegerToString(expBars)+" bars. WATCH = nothing to trade, even if the right panel still shows a live order from an earlier bar.");
    y+=24;
 
    string why="";
-   if(sr.dir!=PX_DIR_NONE)
+   if(lc.state==PX_STATE_ACTIVE && lc.pendingDir!=PX_DIR_NONE)
+      why="Why: managing the live "+PX_DirectionText(lc.pendingDir)+" trade, not a new signal.";
+   else if(lc.state==PX_STATE_PENDING)
+      why=StringFormat("Why: signal armed, waiting for its entry (%d/%d bars).",lc.barsWaiting,expBars);
+   else if(reg.blockSignals)
+      why="Why: market unsafe - "+reg.name+".";
+   else if(vc.spreadBlocked)
+      why="Why: costs too high - waiting.";
+   else if(sr.dir!=PX_DIR_NONE)
    {
       bool buy=(sr.dir==PX_DIR_BUY);
       bool stAgree=(buy && tc.stDir>0)||(!buy && tc.stDir<0);
@@ -361,9 +396,10 @@ void PX_RenderPanel(bool showPanel,string symbol,ENUM_TIMEFRAMES tf,const PX_Reg
       why="Why: leaning "+(buy?"up":"down")+" - "+driver+".";
    }
    else
-      why=(reg.blockSignals?"Why: market unsafe - waiting.":(vc.spreadBlocked?"Why: costs too high - waiting.":"Why: no strong setup yet."));
-   PX_Label("WHY",14,y,why,clrSilver,10,"Consolas","Short plain-language reason for the current state.");
-   y+=24;
+      why="Why: no strong setup yet.";
+   // Wrapped as a safety net: this line embeds the dynamic regime name, and a
+   // label cannot wrap itself. One line still costs exactly the old 24px.
+   y=PX_RenderWrappedLines("WHY",PX_TEXT_X,y,why,clrSilver,10,"Consolas","Short plain-language reason for the current state.",0,2)+6;
 
    // ---- Six sub-scores, two lines, xx/xx (xx%) ----
    PX_Label("SUB_H",14,y,"-- LAYER SCORES --------------------------",clrWhite,9,"Segoe UI"); y+=15;
