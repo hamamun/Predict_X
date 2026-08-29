@@ -527,7 +527,7 @@ void PX_OnNewClosedBar()
    string toggRest=StringFormat("SL %s  ·  FUTURE VIEW %s  ·  DAILY %s",(InpUseInitialStopLoss?"ON":"OFF"),(InpPXM_ShowFutureView?"ON":"OFF"),(InpApplyDailyLossLimit?"ON":"OFF"));
    string fvStatus=PXM_FutureViewStatus(g_value.atr,(g_setup.valid?g_setup.entry:0.0),(g_setup.valid?g_setup.sl:0.0));
    PX_RenderPanel(InpShowPanel,_Symbol,_Period,g_regime,g_d1,g_d2,g_d3,g_d4,g_d5,g_d6,g_score,g_setup,g_value,g_trend,g_lifecycle,g_basePreset.warning,g_signalsToday,g_winsToday,g_lossesToday,0,InpEnableAutoTrading,toggRest,fvStatus,PX_BuildSummaryText(),PX_TM_ShortAction(g_tm.lastAction),PX_ShortTime(g_tm.lastActionTime));
-   PX_TM_RenderOrderPanel(g_tm,InpShowPanel,g_setup,g_score,g_lifecycle);
+   PX_TM_RenderOrderPanel(g_tm,InpShowPanel,g_setup,g_score,g_lifecycle,g_regime.adjusted.minScore);
    ChartRedraw(0);
 }
 
@@ -621,7 +621,7 @@ void OnTick()
       ulong liveTicket=0;
       if(PX_TM_SelectPosition(liveTicket) || PX_TM_SelectPending(liveTicket))
       {
-         PX_TM_RenderOrderPanel(g_tm,InpShowPanel,g_setup,g_score,g_lifecycle);
+         PX_TM_RenderOrderPanel(g_tm,InpShowPanel,g_setup,g_score,g_lifecycle,g_regime.adjusted.minScore);
          ChartRedraw(0);
       }
    }
@@ -641,7 +641,7 @@ void OnTimer()
    string toggRest=StringFormat("SL %s  ·  FUTURE VIEW %s  ·  DAILY %s",(InpUseInitialStopLoss?"ON":"OFF"),(InpPXM_ShowFutureView?"ON":"OFF"),(InpApplyDailyLossLimit?"ON":"OFF"));
    string fvStatus=PXM_FutureViewStatus(g_value.atr,(g_setup.valid?g_setup.entry:0.0),(g_setup.valid?g_setup.sl:0.0));
    PX_RenderPanel(InpShowPanel,_Symbol,_Period,g_regime,g_d1,g_d2,g_d3,g_d4,g_d5,g_d6,g_score,g_setup,g_value,g_trend,g_lifecycle,g_basePreset.warning,g_signalsToday,g_winsToday,g_lossesToday,0,InpEnableAutoTrading,toggRest,fvStatus,PX_BuildSummaryText(),PX_TM_ShortAction(g_tm.lastAction),PX_ShortTime(g_tm.lastActionTime));
-   PX_TM_RenderOrderPanel(g_tm,InpShowPanel,g_setup,g_score,g_lifecycle);
+   PX_TM_RenderOrderPanel(g_tm,InpShowPanel,g_setup,g_score,g_lifecycle,g_regime.adjusted.minScore);
    if(InpShowPanel)
       ChartRedraw(0);
 }

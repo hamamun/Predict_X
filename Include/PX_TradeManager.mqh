@@ -977,7 +977,7 @@ void PX_TM_DrawTradeLines(PX_TradeManagerState &tm)
    if(tm.lastTrail>0.0) PX2_HLine("TRAIL_LINE",tm.lastTrail,clrYellow,STYLE_SOLID,2);
 }
 
-void PX_TM_RenderOrderPanel(PX_TradeManagerState &tm,bool showPanel,const PX_TradeSetup &ts,const PX_ScoreResult &sr,const PX_Lifecycle &lc)
+void PX_TM_RenderOrderPanel(PX_TradeManagerState &tm,bool showPanel,const PX_TradeSetup &ts,const PX_ScoreResult &sr,const PX_Lifecycle &lc,const int minScoreGate=0)
 {
    PX_TM_SyncFromPosition(tm);
    PX_TM_DrawTradeLines(tm);
@@ -996,9 +996,18 @@ void PX_TM_RenderOrderPanel(PX_TradeManagerState &tm,bool showPanel,const PX_Tra
    string state=(hasManaged?tm.stateText:"SETUP READY");
    PX2_Label("ORDER_STATE",x+14,y,"1. STATE: "+state+(tm.enabled?"":" (AUTO OFF)"),(color)0xE8E8E8,11); y+=21;
 
-   string sig=(sr.dir==PX_DIR_BUY?"BUY":(sr.dir==PX_DIR_SELL?"SELL":"NONE"));
-   string method=(hasManaged?(tm.pendingTicket>0?"PENDING LIMIT":"ACTIVE POSITION"):ts.methodText);
-   PX2_Label("ORDER_SIGNAL",x+14,y,StringFormat("2. SIGNAL/TYPE: %s | %s | SCORE %d",sig,method,sr.total),(sr.dir==PX_DIR_BUY?(color)0x90EE90:(sr.dir==PX_DIR_SELL?(color)0x8080FF:(color)0xD0D0D0)),11); y+=21;
+   // While an order is live this line must describe THAT trade's direction, not
+   // the current bar's lean (which may have faded or already flipped).
+   PX_Direction liveDir=(hasManaged && lc.pendingDir!=PX_DIR_NONE?lc.pendingDir:sr.dir);
+   string sig=(liveDir==PX_DIR_BUY?"BUY":(liveDir==PX_DIR_SELL?"SELL":"NONE"));
+   // ShortMethod keeps the line inside the panel (the raw text can be 37 chars).
+   string method=(hasManaged?(tm.pendingTicket>0?"PENDING LIMIT":"ACTIVE POSITION"):PX_TM_ShortMethod(ts.methodText));
+   // Quote the engine's own gate next to the score: "SIGNAL/TYPE: BUY" is the
+   // live direction, the "/60" says whether the current score clears the gate.
+   string scoreTxt=(minScoreGate>0?StringFormat("SCORE %d/%d",sr.total,minScoreGate):StringFormat("SCORE %d",sr.total));
+   color sigClr=(liveDir==PX_DIR_BUY?(color)0x90EE90:(liveDir==PX_DIR_SELL?(color)0x8080FF:(color)0xD0D0D0));
+   if(!hasManaged && minScoreGate>0 && sr.total<minScoreGate) sigClr=clrGray;
+   PX2_Label("ORDER_SIGNAL",x+14,y,StringFormat("2. SIGNAL/TYPE: %s | %s | %s",sig,method,scoreTxt),sigClr,11); y+=21;
 
    if(tm.pendingTicket>0)
    {

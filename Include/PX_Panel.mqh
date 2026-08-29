@@ -76,6 +76,156 @@ string PX_WrapTooltip(string text,int width=58)
    return out;
 }
 
+//+------------------------------------------------------------------+
+//| Left-panel geometry + text metrics.                              |
+//|                                                                  |
+//| Does MQL5 wrap text on the chart? No. A chart text object        |
+//| (OBJ_LABEL / OBJ_TEXT) paints OBJPROP_TEXT as exactly ONE line:  |
+//| there is no word-wrap property for it, and embedded newlines are |
+//| not honoured either (MetaQuotes was asked for a multiline text   |
+//| object and declined it). Only Comment() and TOOLTIPS take line    |
+//| breaks - which is what PX_WrapTooltip() above exists for.        |
+//|                                                                  |
+//| So wrapping has to be done by hand: PX_WrapText() cuts the       |
+//| string at word boundaries, PX_RenderWrappedLines() paints one     |
+//| label per line and returns the new y.                            |
+//+------------------------------------------------------------------+
+#define PX_PNL_X            5     // left panel: x of the background
+#define PX_PNL_Y            18    // left panel: y of the background
+#define PX_PNL_W            455   // left panel: width
+#define PX_PNL_H            462   // left panel: minimum height (grows if needed)
+#define PX_TEXT_X           14    // left panel: x where text starts
+#define PX_TEXT_PAD_R       16    // right padding kept free inside the panel
+// Detail blocks that may span several lines (FUTURE VIEW / SUMMARY /
+// LAST ACTION) are capped at this many lines.
+#define PX_DETAIL_MAX_LINES 3
+// Approximate width of one character of the panel's monospace font, in
+// pixels, per font point (Consolas is ~0.55 em wide; points -> px is x1.333).
+// MQL5 offers no text-metrics call for chart objects, so this is calibrated
+// a touch WIDE on purpose: at worst a line breaks one word early, but a line
+// can never spill outside the panel.
+#define PX_FONT_PX_PER_PT   0.76
+
+double PX_CharPx(const int fontSize)
+{
+   double pt=(double)(fontSize>4?fontSize:9);
+   double px=pt*PX_FONT_PX_PER_PT;
+   return (px<1.0?1.0:px);
+}
+
+// How many characters of this font size fit on one line of the left panel.
+int PX_FitChars(const int fontSize,const int x=PX_TEXT_X,const int widthPx=PX_PNL_W)
+{
+   int avail=widthPx-(x-PX_PNL_X)-PX_TEXT_PAD_R;
+   if(avail<40) avail=40;
+   int n=(int)MathFloor((double)avail/PX_CharPx(fontSize));
+   return (n<16?16:n);
+}
+
+// Vertical pitch of one text line, in pixels (keeps the panel's 16/18 px rhythm).
+int PX_LineHeight(const int fontSize)
+{
+   double pt=(double)(fontSize>4?fontSize:9);
+   return (int)MathCeil(pt*1.75);
+}
+
+void PX_TrimSpaces(string &s)
+{
+   int n=StringLen(s);
+   int b=0,e=n;
+   while(b<e)
+   {
+      ushort c=StringGetCharacter(s,b);
+      if(c!=32 && c!=9) break;   // not space / tab
+      b++;
+   }
+   while(e>b)
+   {
+      ushort c=StringGetCharacter(s,e-1);
+      if(c!=32 && c!=9) break;
+      e--;
+   }
+   s=StringSubstr(s,b,e-b);
+}
+
+void PX_PushLine(string &lines[],const string line)
+{
+   int n=ArraySize(lines);
+   ArrayResize(lines,n+1);
+   lines[n]=line;
+}
+
+//+------------------------------------------------------------------+
+//| Greedy word wrap for one chart text block.                       |
+//| Honours hard breaks (\n, which a label cannot show itself),      |
+//| collapses doubled spaces, splits a single word that is longer    |
+//| than the line, and stops at maxLines with "..." so a block can   |
+//| never grow past its allowance. Returns the number of lines.      |
+//+------------------------------------------------------------------+
+int PX_WrapText(string text,const int maxChars,const int maxLines,string &lines[])
+{
+   ArrayResize(lines,0);
+   if(StringLen(text)<=0) return 0;
+   int width=(maxChars>8?maxChars:8);
+   int cap=(maxLines>0?maxLines:1);
+
+   string body=text;                    // 'text' stays untouched for the fallback + log
+   StringReplace(body,"\r\n","\n");
+   StringReplace(body,"\r","\n");
+
+   string all[];
+   string paras[];
+   int np=StringSplit(body,'\n',paras);
+   if(np<0) np=0;
+   for(int p=0;p<np;p++)
+   {
+      string para=paras[p];
+      while(StringFind(para,"  ")>=0) StringReplace(para,"  "," ");   // labels need single spaces
+      PX_TrimSpaces(para);
+      if(StringLen(para)<=0) continue;
+
+      string words[];
+      int nw=StringSplit(para,' ',words);
+      string cur="";
+      for(int i=0;i<nw;i++)
+      {
+         string w=words[i];
+         if(StringLen(w)<=0) continue;
+         while(StringLen(w)>width)                 // word wider than the line: break it
+         {
+            if(StringLen(cur)>0) { PX_PushLine(all,cur); cur=""; }
+            PX_PushLine(all,StringSubstr(w,0,width));
+            w=StringSubstr(w,width);
+         }
+         if(StringLen(cur)<=0) cur=w;
+         else if(StringLen(cur)+1+StringLen(w)<=width) cur+=" "+w;
+         else { PX_PushLine(all,cur); cur=w; }
+      }
+      if(StringLen(cur)>0) PX_PushLine(all,cur);
+   }
+   if(ArraySize(all)==0) PX_PushLine(all,StringSubstr(text,0,width));
+
+   int n=ArraySize(all);
+   if(n<=cap)
+   {
+      ArrayResize(lines,n);
+      for(int i=0;i<n;i++) lines[i]=all[i];
+      return n;
+   }
+
+   // Does not fit the allowance: keep the first cap lines, mark the last as
+   // truncated, and put what had to be dropped in the Experts log.
+   ArrayResize(lines,cap);
+   for(int i=0;i<cap;i++) lines[i]=all[i];
+   string rest="";
+   for(int i=cap;i<n;i++) rest+=(rest==""?all[i]:" "+all[i]);
+   int room=width-3;
+   if(StringLen(lines[cap-1])>room) lines[cap-1]=StringSubstr(lines[cap-1],0,room);
+   lines[cap-1]+="...";
+   Print("PREDICT-X panel: text needs ",IntegerToString(n)," lines, only ",IntegerToString(cap)," allowed. Dropped: ",rest);
+   return cap;
+}
+
 void PX_Label(string name,int x,int y,string text,color clr=clrWhite,int fontSize=10,string font="Consolas",string tooltip="")
 {
    name=PX_OBJ_PREFIX+name;
@@ -89,6 +239,21 @@ void PX_Label(string name,int x,int y,string text,color clr=clrWhite,int fontSiz
    ObjectSetString(0,name,OBJPROP_TEXT,text);
    ObjectSetString(0,name,OBJPROP_TOOLTIP,PX_WrapTooltip(tooltip==""?text:tooltip));
    ObjectSetInteger(0,name,OBJPROP_SELECTABLE,false);
+}
+
+// Paint a wrapped block starting at (x,y); returns the y just below it.
+// The first line keeps the section tooltip, continuation lines show their
+// own text as tooltip.
+int PX_RenderWrappedLines(const string nameBase,const int x,const int y,const string text,const color clr,const int fontSize,const string font,const string tooltip,const int maxChars=0,const int maxLines=PX_DETAIL_MAX_LINES)
+{
+   int width=(maxChars>0?maxChars:PX_FitChars(fontSize,x));
+   int lh=PX_LineHeight(fontSize);
+   string lines[];
+   int n=PX_WrapText(text,width,maxLines,lines);
+   if(n<=0) return y+lh;                    // empty value: still reserve the line
+   for(int i=0;i<n;i++)
+      PX_Label(nameBase+"_"+IntegerToString(i),x,y+i*lh,lines[i],clr,fontSize,font,(i==0?tooltip:lines[i]));
+   return y+n*lh;
 }
 
 void PX_Rect(string name,int x,int y,int w,int h,color bg,color border=clrDimGray,string tooltip="")
@@ -144,11 +309,12 @@ void PX_RenderPanel(bool showPanel,string symbol,ENUM_TIMEFRAMES tf,const PX_Reg
    PX_DeletePanelObjects();
    if(!showPanel) return;
 
-   // ---- Full panel background (height fits every section with comfortable margin) ----
-   PX_Rect("PANEL_BG",5,18,455,462,(color)0x101010,clrDimGray,"PREDICT-X main decision panel.");
+   // ---- Full panel background (height is re-fitted at the end, once the
+   //      wrapped detail blocks know how many lines they needed) ----
+   PX_Rect("PANEL_BG",PX_PNL_X,PX_PNL_Y,PX_PNL_W,PX_PNL_H,(color)0x101010,clrDimGray,"PREDICT-X main decision panel.");
 
    // ---- Header band: title + symbol + timeframe compatibility chip (top-right) ----
-   PX_Rect("HDR_BG",5,18,455,26,(color)0x141414,clrDimGray,"PREDICT-X header: title, symbol and timeframe compatibility.");
+   PX_Rect("HDR_BG",PX_PNL_X,PX_PNL_Y,PX_PNL_W,26,(color)0x141414,clrDimGray,"PREDICT-X header: title, symbol and timeframe compatibility.");
    PX_Label("HDR_TITLE",14,23,"PREDICT-X v3.0",clrAqua,11,"Segoe UI");
    PX_Label("HDR_SYMBOL",150,23,symbol,clrWhite,12,"Segoe UI");
    color tfClr; string tfChip=PX_TFCompatText(tf,tfClr);
@@ -175,18 +341,53 @@ void PX_RenderPanel(bool showPanel,string symbol,ENUM_TIMEFRAMES tf,const PX_Reg
    PX_Label("SCR_BOT",14,y,"===============================================",clrDimGray,10); y+=18;
 
    // ---- Signal (loud) + plain "Why" ----
+   // Display only, but now driven by the SAME gate the engine uses instead of
+   // the fixed MEDIUM tier (55): g_regime.adjusted.minScore (55 base, 60 on M5,
+   // regime-tuned -5/+5/+10) plus the live signal state. A live/armed signal
+   // keeps its direction here until it expires or flips, so this line can no
+   // longer say WATCH while the order manager panel says BUY.
+   int gate=(reg.adjusted.minScore>0?reg.adjusted.minScore:55);
+   int expBars=(reg.adjusted.signalExpiryBars>0?reg.adjusted.signalExpiryBars:3);
    string sigLine="WATCH";
    color sigClr=clrSilver;
-   if(sr.tier>=PX_TIER_MEDIUM && sr.dir!=PX_DIR_NONE)
+   if(lc.state==PX_STATE_ACTIVE || lc.state==PX_STATE_PENDING)
    {
-      sigLine=PX_DirectionText(sr.dir)+"  ·  "+PX_TierText(sr.tier);
-      sigClr=(sr.dir==PX_DIR_BUY?clrLime:clrTomato);
+      // A live/armed signal owns its direction (lc.pendingDir); the current bar's
+      // lean may already have faded or flipped, so it is only a footnote.
+      PX_Direction liveDir=(lc.pendingDir!=PX_DIR_NONE?lc.pendingDir:sr.dir);
+      string stateTag=(lc.state==PX_STATE_ACTIVE?"IN TRADE":StringFormat("LIVE %d/%d",lc.barsWaiting,expBars));
+      string head=(liveDir!=PX_DIR_NONE?PX_DirectionText(liveDir)+"  ·  ":"");
+      string leanTag=(liveDir!=PX_DIR_NONE && sr.dir!=PX_DIR_NONE && sr.dir!=liveDir?"  ·  lean "+PX_DirectionText(sr.dir):"");
+      sigLine=head+stateTag+leanTag;
+      sigClr=(liveDir==PX_DIR_BUY?clrLime:(liveDir==PX_DIR_SELL?clrTomato:clrSilver));
    }
-   PX_Label("SIGNAL",14,y,sigLine,sigClr,14,"Segoe UI","The loud decision line: what the engine currently recommends.");
+   else if(sr.dir!=PX_DIR_NONE)
+   {
+      if(reg.blockSignals)
+         sigLine="BLOCKED  ·  "+reg.name;
+      else if(vc.spreadBlocked)
+         sigLine="BLOCKED  ·  spread too high";
+      else if(sr.total>=gate)
+      {
+         sigLine=PX_DirectionText(sr.dir)+"  ·  "+PX_TierText(sr.tier);
+         sigClr=(sr.dir==PX_DIR_BUY?clrLime:clrTomato);
+      }
+      else
+         sigLine=StringFormat("WATCH  ·  score %d < %d",sr.total,gate);
+   }
+   PX_Label("SIGNAL",14,y,sigLine,sigClr,14,"Segoe UI","The loud decision line. It uses the engine's own gate, not a fixed threshold: the score must reach the regime-adjusted minimum (currently "+IntegerToString(gate)+"), the market must not be blocked, and a signal already armed stays live for "+IntegerToString(expBars)+" bars. WATCH = nothing to trade, even if the right panel still shows a live order from an earlier bar.");
    y+=24;
 
    string why="";
-   if(sr.dir!=PX_DIR_NONE)
+   if(lc.state==PX_STATE_ACTIVE && lc.pendingDir!=PX_DIR_NONE)
+      why="Why: managing the live "+PX_DirectionText(lc.pendingDir)+" trade, not a new signal.";
+   else if(lc.state==PX_STATE_PENDING)
+      why=StringFormat("Why: signal armed, waiting for its entry (%d/%d bars).",lc.barsWaiting,expBars);
+   else if(reg.blockSignals)
+      why="Why: market unsafe - "+reg.name+".";
+   else if(vc.spreadBlocked)
+      why="Why: costs too high - waiting.";
+   else if(sr.dir!=PX_DIR_NONE)
    {
       bool buy=(sr.dir==PX_DIR_BUY);
       bool stAgree=(buy && tc.stDir>0)||(!buy && tc.stDir<0);
@@ -195,9 +396,10 @@ void PX_RenderPanel(bool showPanel,string symbol,ENUM_TIMEFRAMES tf,const PX_Reg
       why="Why: leaning "+(buy?"up":"down")+" - "+driver+".";
    }
    else
-      why=(reg.blockSignals?"Why: market unsafe - waiting.":(vc.spreadBlocked?"Why: costs too high - waiting.":"Why: no strong setup yet."));
-   PX_Label("WHY",14,y,why,clrSilver,10,"Consolas","Short plain-language reason for the current state.");
-   y+=24;
+      why="Why: no strong setup yet.";
+   // Wrapped as a safety net: this line embeds the dynamic regime name, and a
+   // label cannot wrap itself. One line still costs exactly the old 24px.
+   y=PX_RenderWrappedLines("WHY",PX_TEXT_X,y,why,clrSilver,10,"Consolas","Short plain-language reason for the current state.",0,2)+6;
 
    // ---- Six sub-scores, two lines, xx/xx (xx%) ----
    PX_Label("SUB_H",14,y,"-- LAYER SCORES --------------------------",clrWhite,9,"Segoe UI"); y+=15;
@@ -229,22 +431,26 @@ void PX_RenderPanel(bool showPanel,string symbol,ENUM_TIMEFRAMES tf,const PX_Reg
    y+=4;
 
    // ---- Future view status (simple language) ----
+   // Wrapping instead of clipping: MT5 labels cannot word-wrap, so the block
+   // is laid out as up to PX_DETAIL_MAX_LINES label lines (see PX_WrapText).
    PX_Label("FV_H",14,y,"-- FUTURE VIEW ----------------------------",clrAqua,10,"Segoe UI"); y+=15;
-   PX_Label("FV1",14,y,fvStatus,clrSilver,9,"Consolas","How similar past setups on this symbol+TF ended. Show-only - never changes a trade.");
-   y+=20;
+   y=PX_RenderWrappedLines("FV1",PX_TEXT_X,y,fvStatus,clrSilver,9,"Consolas","How similar past setups on this symbol+TF ended. Show-only - never changes a trade.")+4;
 
    // ---- Summary (why / what / how) ----
    PX_Label("SUM_H",14,y,"-- SUMMARY -------------------------------",clrWhite,10,"Segoe UI"); y+=15;
-   PX_Label("SUM1",14,y,summary,clrGold,9,"Consolas","Plain-language explanation of what the engine sees and why.");
-   y+=32;
+   y=PX_RenderWrappedLines("SUM1",PX_TEXT_X,y,summary,clrGold,9,"Consolas","Plain-language explanation of what the engine sees and why.")+PX_LineHeight(9);
 
    // ---- Last action (real time) ----
    PX_Label("ACT_H",14,y,"-- LAST ACTION ---------------------------",clrWhite,10,"Segoe UI"); y+=15;
-   PX_Label("ACT1",14,y,StringFormat("%s   %s",lastActionTime,lastAction),clrSilver,10,"Consolas","The most recent action the engine took, with a live timestamp.");
-   y+=18;
+   y=PX_RenderWrappedLines("ACT1",PX_TEXT_X,y,StringFormat("%s %s",lastActionTime,lastAction),clrSilver,10,"Consolas","The most recent action the engine took, with a live timestamp.");
 
    // ---- Today's summary line (small) ----
    PX_Label("TODAY",14,y,StringFormat("Today: %d signal%s | %d win | %d loss",signalsToday,(signalsToday==1?"":"s"),wins,losses),clrDimGray,9,"Consolas","Today's signal/win/loss counts.");
+
+   // ---- Fit the background to the content: single-line details keep the
+   //      panel exactly as tall as before; wrapped details grow it. ----
+   int need=y+PX_LineHeight(9)+16-PX_PNL_Y;
+   ObjectSetInteger(0,PX_OBJ_PREFIX+"PANEL_BG",OBJPROP_YSIZE,(need>PX_PNL_H?need:PX_PNL_H));
 }
 
 void PX_DrawRegimeBar(const PX_RegimeState &reg)
