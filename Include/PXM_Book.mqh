@@ -75,7 +75,8 @@ struct PXM_LivePend
    int      dir;
    double   entry,sl,tp1,tp2;
    double   atr,openLots;
-   double   profitSum,exitPrice,exitTime;
+   double   profitSum,exitPrice;
+   datetime exitTime;      // kept as datetime: it feeds PXM_ScanMAE(...,datetime toT,...)
    int      tp1hit;
    int      isTP;
    int      method;   // PX_EntryMethod at plan time (1 = market)
@@ -111,6 +112,34 @@ string PXM_GV(const string suffix)
 string PXM_FileName()
 {
    return "PREDICTX-MEM_"+_Symbol+"_"+PX_TFToString(_Period)+".csv";
+}
+
+//--- single source of truth for the CSV header (written on create and rewrite)
+string PXM_HeaderLine()
+{
+   return "PXMV1,PXM memory bank (show-only). kind,time,dir,score,tier,l1..l6,candle,er,atrRatio,adx,rsi,stDir,sqz,atrPts,spreadPts,entry,sl,tp1,tp2,result,win,tp1hit,maeATR,pnlR,barsRes";
+}
+
+//+------------------------------------------------------------------+
+//| Pending-tracker persistence.                                      |
+//| A terminal global variable holds exactly ONE double - there is no |
+//| array overload of GlobalVariableSet/Get - so the live tracker is  |
+//| stored as one scalar GV per field (same pattern as PX_TradeManager|
+//| ). All keys stay under PREDICTX.MEM.<sym>.<tf>.pend.* so nothing  |
+//| collides with the TradeManager or OnlineAI keys.                  |
+//+------------------------------------------------------------------+
+double PXM_PendGet(const string suffix)
+{
+   string key=PXM_GV(suffix);
+   if(!GlobalVariableCheck(key)) return 0.0;
+   return GlobalVariableGet(key);
+}
+
+void PXM_PendDelGV()
+{
+   // every tracker field lives under "...<tf>.pend." - one prefix sweep clears
+   // them all and touches nothing else (rehearseDone and other keys are safe).
+   GlobalVariablesDeleteAll(PXM_GV("pend."));
 }
 
 //+------------------------------------------------------------------+
@@ -251,20 +280,27 @@ void PXM_Load()
       }
       FileClose(h);
    }
-   if(GlobalVariableCheck(PXM_GV("pend")))
+   g_pxmPendActive=false;
+   if(GlobalVariableCheck(PXM_GV("pend.time")))
    {
-      double p[];
-      if(GlobalVariableGet(PXM_GV("pend"),p) && ArraySize(p)>=16 && p[0]>0.0)
+      double t=PXM_PendGet("pend.time");
+      if(t>0.0)
       {
-         g_pxmPend.time=(datetime)(long)p[0];   g_pxmPend.dir=(int)p[1];
-         g_pxmPend.entry=p[2];  g_pxmPend.sl=p[3];
-         g_pxmPend.tp1=p[4];    g_pxmPend.tp2=p[5];
-         g_pxmPend.atr=p[6];    g_pxmPend.openLots=p[7];
-         g_pxmPend.profitSum=p[8];
-         g_pxmPend.tp1hit=(int)p[9];
-         g_pxmPend.exitPrice=p[10]; g_pxmPend.exitTime=p[11];
-         g_pxmPend.isTP=(int)p[12];
-         g_pxmPend.method=(int)p[13]; g_pxmPend.filled=(int)p[14];
+         g_pxmPend.time=(datetime)(long)t;
+         g_pxmPend.dir=(int)PXM_PendGet("pend.dir");
+         g_pxmPend.entry=PXM_PendGet("pend.entry");
+         g_pxmPend.sl=PXM_PendGet("pend.sl");
+         g_pxmPend.tp1=PXM_PendGet("pend.tp1");
+         g_pxmPend.tp2=PXM_PendGet("pend.tp2");
+         g_pxmPend.atr=PXM_PendGet("pend.atr");
+         g_pxmPend.openLots=PXM_PendGet("pend.openLots");
+         g_pxmPend.profitSum=PXM_PendGet("pend.profitSum");
+         g_pxmPend.tp1hit=(int)PXM_PendGet("pend.tp1hit");
+         g_pxmPend.exitPrice=PXM_PendGet("pend.exitPrice");
+         g_pxmPend.exitTime=(datetime)(long)PXM_PendGet("pend.exitTime");
+         g_pxmPend.isTP=(int)PXM_PendGet("pend.isTP");
+         g_pxmPend.method=(int)PXM_PendGet("pend.method");
+         g_pxmPend.filled=(int)PXM_PendGet("pend.filled");
          g_pxmPendActive=true;
       }
    }
@@ -272,26 +308,41 @@ void PXM_Load()
 
 void PXM_SavePendGV()
 {
-   double p[16];
-   for(int i=0;i<16;i++) p[i]=0.0;
-   if(!g_pxmPendActive) { GlobalVariableDel(PXM_GV("pend")); return; }
-   p[0]=(double)(long)g_pxmPend.time;  p[1]=(double)g_pxmPend.dir;
-   p[2]=g_pxmPend.entry; p[3]=g_pxmPend.sl;
-   p[4]=g_pxmPend.tp1;   p[5]=g_pxmPend.tp2;
-   p[6]=g_pxmPend.atr;   p[7]=g_pxmPend.openLots;
-   p[8]=g_pxmPend.profitSum; p[9]=(double)g_pxmPend.tp1hit;
-   p[10]=g_pxmPend.exitPrice; p[11]=g_pxmPend.exitTime; p[12]=(double)g_pxmPend.isTP;
-   p[13]=(double)g_pxmPend.method; p[14]=(double)g_pxmPend.filled;
-   GlobalVariableSet(PXM_GV("pend"),p);
+   if(!g_pxmPendActive) { PXM_PendDelGV(); return; }
+   GlobalVariableSet(PXM_GV("pend.time"),      (double)(long)g_pxmPend.time);
+   GlobalVariableSet(PXM_GV("pend.dir"),       (double)g_pxmPend.dir);
+   GlobalVariableSet(PXM_GV("pend.entry"),     g_pxmPend.entry);
+   GlobalVariableSet(PXM_GV("pend.sl"),        g_pxmPend.sl);
+   GlobalVariableSet(PXM_GV("pend.tp1"),       g_pxmPend.tp1);
+   GlobalVariableSet(PXM_GV("pend.tp2"),       g_pxmPend.tp2);
+   GlobalVariableSet(PXM_GV("pend.atr"),       g_pxmPend.atr);
+   GlobalVariableSet(PXM_GV("pend.openLots"),  g_pxmPend.openLots);
+   GlobalVariableSet(PXM_GV("pend.profitSum"), g_pxmPend.profitSum);
+   GlobalVariableSet(PXM_GV("pend.tp1hit"),    (double)g_pxmPend.tp1hit);
+   GlobalVariableSet(PXM_GV("pend.exitPrice"), g_pxmPend.exitPrice);
+   GlobalVariableSet(PXM_GV("pend.exitTime"),  (double)(long)g_pxmPend.exitTime);
+   GlobalVariableSet(PXM_GV("pend.isTP"),      (double)g_pxmPend.isTP);
+   GlobalVariableSet(PXM_GV("pend.method"),    (double)g_pxmPend.method);
+   GlobalVariableSet(PXM_GV("pend.filled"),    (double)g_pxmPend.filled);
 }
 
 bool PXM_RewriteFile()
 {
-   int h=FileOpen(PXM_FileName(),FILE_READ|FILE_WRITE|FILE_TXT|FILE_SHARE_READ|FILE_SHARE_WRITE);
-   if(h<0) return false;
-   FileSeek(h,0,SEEK_SET);
-   FileTruncate(h,0);
-   FileWriteString(h,"PXMV1,PXM memory bank (show-only). kind,time,dir,score,tier,l1..l6,candle,er,atrRatio,adx,rsi,stDir,sqz,atrPts,spreadPts,entry,sl,tp1,tp2,result,win,tp1hit,maeATR,pnlR,barsRes\n");
+   // MQL5 has no FileTruncate(). Opening with FILE_WRITE and WITHOUT FILE_READ
+   // recreates the file at zero length, which is the supported way to truncate.
+   // The live append handle must be closed first or the reopen can fail.
+   string name=PXM_FileName();
+   if(g_pxmFile>=0) { FileClose(g_pxmFile); g_pxmFile=-1; }
+   int h=FileOpen(name,FILE_WRITE|FILE_TXT|FILE_SHARE_READ|FILE_SHARE_WRITE);
+   if(h<0)
+   {
+      Print("PREDICT-X MEM: rewrite failed to open '",name,"' err=",GetLastError());
+      // try to restore the append handle so logging survives a failed rewrite
+      g_pxmFile=FileOpen(name,FILE_READ|FILE_WRITE|FILE_TXT|FILE_SHARE_READ|FILE_SHARE_WRITE);
+      if(g_pxmFile>=0) FileSeek(g_pxmFile,0,SEEK_END);
+      return false;
+   }
+   FileWriteString(h,PXM_HeaderLine()+"\n");
    for(int i=0;i<g_pxmCount;i++)
    {
       PXM_Row r=g_pxmRows[i];
@@ -301,9 +352,16 @@ bool PXM_RewriteFile()
       FileWriteString(h,line+"\n");
    }
    FileFlush(h);
-   FileSeek(h,0,SEEK_END);
-   if(g_pxmFile>=0 && g_pxmFile!=h) FileClose(g_pxmFile);
-   g_pxmFile=h;
+   FileClose(h);
+   // reopen read/write so PXM_WriteLine() can keep appending
+   g_pxmFile=FileOpen(name,FILE_READ|FILE_WRITE|FILE_TXT|FILE_SHARE_READ|FILE_SHARE_WRITE);
+   if(g_pxmFile<0)
+   {
+      Print("PREDICT-X MEM: rewrite done but reopen failed err=",GetLastError(),
+            " - memory logging disabled this session.");
+      return false;
+   }
+   FileSeek(g_pxmFile,0,SEEK_END);
    return true;
 }
 
@@ -319,7 +377,7 @@ void PXM_Init()
       int h=FileOpen(name,FILE_READ|FILE_WRITE|FILE_TXT);
       if(h>=0)
       {
-         FileWriteString(h,"PXMV1,PXM memory bank (show-only). kind,time,dir,score,tier,l1..l6,candle,er,atrRatio,adx,rsi,stDir,sqz,atrPts,spreadPts,entry,sl,tp1,tp2,result,win,tp1hit,maeATR,pnlR,barsRes\n");
+         FileWriteString(h,PXM_HeaderLine()+"\n");
          FileClose(h);
       }
    }
@@ -584,7 +642,7 @@ void PXM_LogLiveSignal(const PX_Lifecycle &lc,const PX_ScoreResult &sr,const PX_
    g_pxmPend.time=lc.signalTime; g_pxmPend.dir=(int)sr.dir;
    g_pxmPend.entry=0.0; g_pxmPend.sl=0.0; g_pxmPend.tp1=0.0; g_pxmPend.tp2=0.0;
    g_pxmPend.atr=vc.atr; g_pxmPend.openLots=0.0; g_pxmPend.profitSum=0.0;
-   g_pxmPend.tp1hit=0; g_pxmPend.exitPrice=0.0; g_pxmPend.exitTime=0.0; g_pxmPend.isTP=0;
+   g_pxmPend.tp1hit=0; g_pxmPend.exitPrice=0.0; g_pxmPend.exitTime=0; g_pxmPend.isTP=0;
    g_pxmPend.method=0; g_pxmPend.filled=0;
    g_pxmPendActive=true;
    PXM_SavePendGV();
