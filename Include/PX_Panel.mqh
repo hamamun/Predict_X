@@ -5,6 +5,7 @@
 #include "PX_Layer2_Trend.mqh"
 #include "PX_Layer3_Value.mqh"
 #include "PX_SignalLifecycle.mqh"
+#include "PX_PanelGeometry.mqh"
 
 string PX_OBJ_PREFIX="PX_";
 
@@ -90,12 +91,8 @@ string PX_WrapTooltip(string text,int width=58)
 //| string at word boundaries, PX_RenderWrappedLines() paints one     |
 //| label per line and returns the new y.                            |
 //+------------------------------------------------------------------+
-#define PX_PNL_X            5     // left panel: x of the background
-#define PX_PNL_Y            18    // left panel: y of the background
-#define PX_PNL_W            455   // left panel: width
-#define PX_PNL_H            462   // left panel: minimum height (grows if needed)
-#define PX_TEXT_X           14    // left panel: x where text starts
-#define PX_TEXT_PAD_R       16    // right padding kept free inside the panel
+// Shared left/right panel coordinates live in PX_PanelGeometry.mqh so the
+// order-manager panel can stay adjacent to this main panel.
 // Detail blocks that may span several lines (FUTURE VIEW / SUMMARY /
 // LAST ACTION) are capped at this many lines.
 #define PX_DETAIL_MAX_LINES 3

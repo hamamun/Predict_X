@@ -27,6 +27,7 @@ enum PX_TradingMode { PX_MODE_CONSERVATIVE=0, PX_MODE_NORMAL=1, PX_MODE_AGGRESSI
 // --- Novice-friendly inputs. Auto-trading occurs only when the master switch is ON.
 input bool             InpEnableAutoTrading   = false;            // Enable Auto Trading - Phase 2 master switch
 input bool             InpUseInitialStopLoss  = false;            // Use Initial Stop Loss on Order Placement
+input bool             InpEnableTradeProtection = true;           // Enable Trade Protection
 input double           InpRiskPerTradePercent = 1.0;              // Risk Per Trade (%)
 input PX_TradingMode   InpTradingMode         = PX_MODE_NORMAL;   // Trading Mode
 input bool             InpAutoAdjustSettings  = true;             // Auto-Adjust Settings
@@ -507,7 +508,7 @@ void PX_OnNewClosedBar()
       PX4_SendAlert(InpPushNotifications,InpPopupAlerts,InpSoundAlerts,StringFormat("New %s %s signal on %s %s | Score %d | Entry %s",PX_TierText(g_score.tier),PX_DirectionText(g_score.dir),_Symbol,PX_TFToString(_Period),g_score.total,g_setup.methodText));
 
    // Phase 2 automated execution and management. Master switch controls all auto actions.
-   PX_TM_OnNewBar(g_tm,InpEnableAutoTrading,InpUseInitialStopLoss,InpApplyDailyLossLimit,InpDailyLossLimitPct,InpActivePredictionMonitor,g_lifecycle,g_score,g_setup,g_regime,g_value,g_trend);
+   PX_TM_OnNewBar(g_tm,InpEnableAutoTrading,InpUseInitialStopLoss,InpEnableTradeProtection,InpApplyDailyLossLimit,InpDailyLossLimitPct,InpActivePredictionMonitor,g_lifecycle,g_score,g_setup,g_regime,g_value,g_trend);
 
    if(drawSignalMarker)
    {
@@ -524,10 +525,11 @@ void PX_OnNewClosedBar()
 
    PX_DrawRegimeBar(g_regime);
    // Standard-interface left panel: plain-language summary + future view + last action.
-   string toggRest=StringFormat("SL %s  ·  FUTURE VIEW %s  ·  DAILY %s",(InpUseInitialStopLoss?"ON":"OFF"),(InpPXM_ShowFutureView?"ON":"OFF"),(InpApplyDailyLossLimit?"ON":"OFF"));
+   bool effectiveDailyLoss=(InpEnableTradeProtection && InpApplyDailyLossLimit);
+   string toggRest=StringFormat("SL %s  ·  FUTURE VIEW %s  ·  DAILY %s",(InpUseInitialStopLoss?"ON":"OFF"),(InpPXM_ShowFutureView?"ON":"OFF"),(effectiveDailyLoss?"ON":"OFF"));
    string fvStatus=PXM_FutureViewStatus(g_value.atr,(g_setup.valid?g_setup.entry:0.0),(g_setup.valid?g_setup.sl:0.0));
    PX_RenderPanel(InpShowPanel,_Symbol,_Period,g_regime,g_d1,g_d2,g_d3,g_d4,g_d5,g_d6,g_score,g_setup,g_value,g_trend,g_lifecycle,g_basePreset.warning,g_signalsToday,g_winsToday,g_lossesToday,0,InpEnableAutoTrading,toggRest,fvStatus,PX_BuildSummaryText(),PX_TM_ShortAction(g_tm.lastAction),PX_ShortTime(g_tm.lastActionTime));
-   PX_TM_RenderOrderPanel(g_tm,InpShowPanel,g_setup,g_score,g_lifecycle,g_regime.adjusted.minScore);
+   PX_TM_RenderOrderPanel(g_tm,InpShowPanel,g_setup,g_score,g_lifecycle,InpEnableTradeProtection);
    ChartRedraw(0);
 }
 
@@ -608,8 +610,8 @@ void OnTick()
 {
    PX_CheckInstantPendingFlip();
    double liveSTDir=0.0;
-   if(PX_Copy1(g_hST,1,0,liveSTDir)) PX_TM_OnInstantTick(g_tm,InpEnableAutoTrading,InpActivePredictionMonitor,(liveSTDir>0?1:(liveSTDir<0?-1:0)));
-   if(InpEnableAutoTrading)
+   if(PX_Copy1(g_hST,1,0,liveSTDir)) PX_TM_OnInstantTick(g_tm,InpEnableAutoTrading,(InpEnableTradeProtection && InpActivePredictionMonitor),(liveSTDir>0?1:(liveSTDir<0?-1:0)));
+   if(InpEnableAutoTrading && InpEnableTradeProtection)
    {
       PX_TM_ApplyEarlyProfitLock(g_tm);
       PX_TM_CheckTP1(g_tm);
@@ -621,7 +623,7 @@ void OnTick()
       ulong liveTicket=0;
       if(PX_TM_SelectPosition(liveTicket) || PX_TM_SelectPending(liveTicket))
       {
-         PX_TM_RenderOrderPanel(g_tm,InpShowPanel,g_setup,g_score,g_lifecycle,g_regime.adjusted.minScore);
+         PX_TM_RenderOrderPanel(g_tm,InpShowPanel,g_setup,g_score,g_lifecycle,InpEnableTradeProtection);
          ChartRedraw(0);
       }
    }
@@ -638,10 +640,11 @@ void OnTimer()
    // ALADDIN-IMP: chunked rehearsal pump (history building; never touches live state).
    PXM_RehearsePump(g_hST,g_hRSI,g_hADX,g_hATR14,g_hATR100,g_hKC,g_hTTM,g_basePreset);
    PX_DrawRegimeBar(g_regime);
-   string toggRest=StringFormat("SL %s  ·  FUTURE VIEW %s  ·  DAILY %s",(InpUseInitialStopLoss?"ON":"OFF"),(InpPXM_ShowFutureView?"ON":"OFF"),(InpApplyDailyLossLimit?"ON":"OFF"));
+   bool effectiveDailyLoss=(InpEnableTradeProtection && InpApplyDailyLossLimit);
+   string toggRest=StringFormat("SL %s  ·  FUTURE VIEW %s  ·  DAILY %s",(InpUseInitialStopLoss?"ON":"OFF"),(InpPXM_ShowFutureView?"ON":"OFF"),(effectiveDailyLoss?"ON":"OFF"));
    string fvStatus=PXM_FutureViewStatus(g_value.atr,(g_setup.valid?g_setup.entry:0.0),(g_setup.valid?g_setup.sl:0.0));
    PX_RenderPanel(InpShowPanel,_Symbol,_Period,g_regime,g_d1,g_d2,g_d3,g_d4,g_d5,g_d6,g_score,g_setup,g_value,g_trend,g_lifecycle,g_basePreset.warning,g_signalsToday,g_winsToday,g_lossesToday,0,InpEnableAutoTrading,toggRest,fvStatus,PX_BuildSummaryText(),PX_TM_ShortAction(g_tm.lastAction),PX_ShortTime(g_tm.lastActionTime));
-   PX_TM_RenderOrderPanel(g_tm,InpShowPanel,g_setup,g_score,g_lifecycle,g_regime.adjusted.minScore);
+   PX_TM_RenderOrderPanel(g_tm,InpShowPanel,g_setup,g_score,g_lifecycle,InpEnableTradeProtection);
    if(InpShowPanel)
       ChartRedraw(0);
 }

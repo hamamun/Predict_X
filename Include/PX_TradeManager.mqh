@@ -7,6 +7,7 @@
 #include "PX_Layer2_Trend.mqh"
 #include "PX_Layer3_Value.mqh"
 #include "PX_SignalLifecycle.mqh"
+#include "PX_PanelGeometry.mqh"
 
 #define PX_MAGIC 26070501
 
@@ -882,20 +883,22 @@ void PX_TM_OnInstantTick(PX_TradeManagerState &tm,bool enableAutoTrading,bool ac
    }
 }
 
-void PX_TM_OnNewBar(PX_TradeManagerState &tm,bool enableAutoTrading,bool useInitialStopLoss,bool applyDailyLossLimit,double dailyLossLimitPct,bool activePredictionMonitor,PX_Lifecycle &lc,const PX_ScoreResult &sr,const PX_TradeSetup &ts,const PX_RegimeState &reg,const PX_ValueContext &vc,const PX_TrendContext &trend)
+void PX_TM_OnNewBar(PX_TradeManagerState &tm,bool enableAutoTrading,bool useInitialStopLoss,bool enableTradeProtection,bool applyDailyLossLimit,double dailyLossLimitPct,bool activePredictionMonitor,PX_Lifecycle &lc,const PX_ScoreResult &sr,const PX_TradeSetup &ts,const PX_RegimeState &reg,const PX_ValueContext &vc,const PX_TrendContext &trend)
 {
    PX_TM_SyncFromPosition(tm);
    tm.enabled=enableAutoTrading;
-   tm.dailyLossControlEnabled=applyDailyLossLimit;
-   if(!applyDailyLossLimit) tm.dailyHalted=false;
-   if(applyDailyLossLimit && enableAutoTrading && PX_TM_DailyLimitHit(tm,dailyLossLimitPct))
+   // Protection OFF means no EA-side protective exits/guards; the trade is left
+   // to the broker-side TP/SL settings exactly as configured by the inputs.
+   tm.dailyLossControlEnabled=(applyDailyLossLimit && enableTradeProtection);
+   if(!tm.dailyLossControlEnabled) tm.dailyHalted=false;
+   if(tm.dailyLossControlEnabled && enableAutoTrading && PX_TM_DailyLimitHit(tm,dailyLossLimitPct))
    {
       PX_TM_CancelPending(tm,"daily loss limit");
       PX_TM_ClosePosition(tm,"daily loss limit");
       tm.stateText="DAILY HALT";
       return;
    }
-   if(!PX_TM_TradingAllowed(tm,enableAutoTrading,applyDailyLossLimit,dailyLossLimitPct))
+   if(!PX_TM_TradingAllowed(tm,enableAutoTrading,tm.dailyLossControlEnabled,dailyLossLimitPct))
    {
       // Master switch OFF: no new orders and no modifications. Existing positions remain user-controlled.
       return;
@@ -933,11 +936,14 @@ void PX_TM_OnNewBar(PX_TradeManagerState &tm,bool enableAutoTrading,bool useInit
    if(PX_TM_SelectPosition(tm.positionTicket))
    {
       lc.state=PX_STATE_ACTIVE;
-      PX_TM_ApplyEarlyProfitLock(tm);
-      PX_TM_CheckTP1(tm);
-      PX_TM_ApplyPostTP1GivebackTrail(tm);
-      PX_TM_TradeHealthCheck(tm,sr,trend,reg,activePredictionMonitor);
-      PX_TM_ApplyAdaptiveTrail(tm,reg,trend,sr,vc.atr);
+      if(enableTradeProtection)
+      {
+         PX_TM_ApplyEarlyProfitLock(tm);
+         PX_TM_CheckTP1(tm);
+         PX_TM_ApplyPostTP1GivebackTrail(tm);
+         PX_TM_TradeHealthCheck(tm,sr,trend,reg,activePredictionMonitor);
+         PX_TM_ApplyAdaptiveTrail(tm,reg,trend,sr,vc.atr);
+      }
       return;
    }
 
@@ -977,7 +983,7 @@ void PX_TM_DrawTradeLines(PX_TradeManagerState &tm)
    if(tm.lastTrail>0.0) PX2_HLine("TRAIL_LINE",tm.lastTrail,clrYellow,STYLE_SOLID,2);
 }
 
-void PX_TM_RenderOrderPanel(PX_TradeManagerState &tm,bool showPanel,const PX_TradeSetup &ts,const PX_ScoreResult &sr,const PX_Lifecycle &lc,const int minScoreGate=0)
+void PX_TM_RenderOrderPanel(PX_TradeManagerState &tm,bool showPanel,const PX_TradeSetup &ts,const PX_ScoreResult &sr,const PX_Lifecycle &lc,const bool enableTradeProtection=true)
 {
    PX_TM_SyncFromPosition(tm);
    PX_TM_DrawTradeLines(tm);
@@ -987,28 +993,24 @@ void PX_TM_RenderOrderPanel(PX_TradeManagerState &tm,bool showPanel,const PX_Tra
    bool hasSetup=(ts.valid && sr.tier>=PX_TIER_MEDIUM && sr.dir!=PX_DIR_NONE && lc.state==PX_STATE_PENDING);
    if(!showPanel || (!hasManaged && !hasSetup)) return;
 
-   int x=470,y=18,w=535,h=495;
+   int x=PX_RIGHT_PNL_X,y=PX_RIGHT_PNL_Y,w=PX_RIGHT_PNL_W,h=PX_RIGHT_PNL_H;
+   if(ObjectFind(0,PX_MAIN_PANEL_BG_NAME)>=0)
+   {
+      long leftPanelH=ObjectGetInteger(0,PX_MAIN_PANEL_BG_NAME,OBJPROP_YSIZE);
+      if(leftPanelH>0) h=(int)leftPanelH;
+   }
    PX2_Rect("ORDER_BG",x,y,w,h,(color)0x101010,clrDimGray);
    y+=12;
    PX2_Label("ORDER_TITLE",x+14,y,"PREDICT-X SETUP / ORDER MANAGER",(color)0xFFD8A8,12,"Segoe UI"); y+=24;
 
    int digs=(int)SymbolInfoInteger(_Symbol,SYMBOL_DIGITS);
-   string state=(hasManaged?tm.stateText:"SETUP READY");
-   PX2_Label("ORDER_STATE",x+14,y,"1. STATE: "+state+(tm.enabled?"":" (AUTO OFF)"),(color)0xE8E8E8,11); y+=21;
+   string protectionLine=(!tm.enabled ? "1. AUTO TRADE OFF | PROTECTION: OFF" : "1. PROTECTION: "+(enableTradeProtection?"ON":"OFF"));
+   color protectionClr=(!tm.enabled ? clrTomato : (enableTradeProtection?(color)0x90EE90:(color)0xFFD8A8));
+   PX2_Label("ORDER_STATE",x+14,y,protectionLine,protectionClr,11); y+=21;
 
-   // While an order is live this line must describe THAT trade's direction, not
-   // the current bar's lean (which may have faded or already flipped).
-   PX_Direction liveDir=(hasManaged && lc.pendingDir!=PX_DIR_NONE?lc.pendingDir:sr.dir);
-   string sig=(liveDir==PX_DIR_BUY?"BUY":(liveDir==PX_DIR_SELL?"SELL":"NONE"));
-   // ShortMethod keeps the line inside the panel (the raw text can be 37 chars).
-   string method=(hasManaged?(tm.pendingTicket>0?"PENDING LIMIT":"ACTIVE POSITION"):PX_TM_ShortMethod(ts.methodText));
-   // Quote the engine's own gate next to the score: "SIGNAL/TYPE: BUY" is the
-   // live direction, the "/60" says whether the current score clears the gate.
-   string scoreTxt=(minScoreGate>0?StringFormat("SCORE %d/%d",sr.total,minScoreGate):StringFormat("SCORE %d",sr.total));
-   color sigClr=(liveDir==PX_DIR_BUY?(color)0x90EE90:(liveDir==PX_DIR_SELL?(color)0x8080FF:(color)0xD0D0D0));
-   if(!hasManaged && minScoreGate>0 && sr.total<minScoreGate) sigClr=clrGray;
-   PX2_Label("ORDER_SIGNAL",x+14,y,StringFormat("2. SIGNAL/TYPE: %s | %s | %s",sig,method,scoreTxt),sigClr,11); y+=21;
-
+   // Signal/type is intentionally not repeated here. The left panel is the
+   // single source of truth for current direction; this panel only shows the
+   // setup/order/trade data tied to that signal.
    if(tm.pendingTicket>0)
    {
       PX2_Label("ORDER_TICKET",x+14,y,"ORDER: Pending #"+IntegerToString((long)tm.pendingTicket),(color)0x80D7FF,11); y+=20;
@@ -1029,18 +1031,18 @@ void PX_TM_RenderOrderPanel(PX_TradeManagerState &tm,bool showPanel,const PX_Tra
    double be=(hasManaged?tm.breakeven:ts.breakeven);
    double lot=(hasManaged && tm.positionTicket>0?PositionGetDouble(POSITION_VOLUME):ts.lot);
 
-   PX2_Label("SEC_SETUP",x+14,y,"3. ENTRY SETUP",(color)0xE8E8E8,11,"Segoe UI"); y+=19;
+   PX2_Label("SEC_SETUP",x+14,y,"2. ENTRY SETUP",(color)0xE8E8E8,11,"Segoe UI"); y+=19;
    PX2_Label("ORDER_ENTRY",x+34,y,StringFormat("ENTRY: %.*f",digs,entry),(color)0xD0D0D0,11); y+=18;
    PX2_Label("ORDER_SL",x+34,y,StringFormat("SL:    %.*f",digs,sl),(color)0xD0D0D0,11); y+=18;
    PX2_Label("ORDER_TP1",x+34,y,StringFormat("TP1:   %.*f %s",digs,tp1,(hasManaged?(tm.tp1Hit?"HIT":"WAIT"):"PLAN")),(hasManaged&&tm.tp1Hit?(color)0x90EE90:(color)0xD0D0D0),11); y+=18;
    PX2_Label("ORDER_TP2",x+34,y,StringFormat("TP2:   %.*f",digs,tp2),(color)0xD0D0D0,11); y+=18;
    PX2_Label("ORDER_BE",x+34,y,StringFormat("BREAKEVEN: %.*f",digs,be),(color)0xD0D0D0,11); y+=20;
 
-   PX2_Label("SEC_RISK",x+14,y,"4. RISK / REWARD",(color)0xE8E8E8,11,"Segoe UI"); y+=19;
+   PX2_Label("SEC_RISK",x+14,y,"3. RISK / REWARD",(color)0xE8E8E8,11,"Segoe UI"); y+=19;
    PX2_Label("ORDER_RISK",x+34,y,StringFormat("LOT: %.2f | RISK: $%.2f | REWARD: $%.2f",lot,ts.riskMoney,ts.rewardMoney),(color)0xD0D0D0,11); y+=18;
    PX2_Label("ORDER_RR",x+34,y,StringFormat("R:R %.2f | METHOD: %s",ts.rr,PX_TM_ShortMethod(ts.methodText)),(color)0xD0D0D0,11); y+=20;
 
-   PX2_Label("SEC_STATUS",x+14,y,"5. POSITION STATUS",(color)0xE8E8E8,11,"Segoe UI"); y+=19;
+   PX2_Label("SEC_STATUS",x+14,y,"4. POSITION STATUS",(color)0xE8E8E8,11,"Segoe UI"); y+=19;
    if(hasManaged)
       PX2_Label("ORDER_STATUS",x+34,y,StringFormat("TP1: %s | TP2: %s",(tm.tp1Hit?"HIT":"WAIT"),(tm.positionTicket>0?"WAIT":"PLAN")),(color)0xD0D0D0,11);
    else
@@ -1048,15 +1050,19 @@ void PX_TM_RenderOrderPanel(PX_TradeManagerState &tm,bool showPanel,const PX_Tra
    y+=18;
    PX2_Label("ORDER_TF",x+34,y,StringFormat("ENTRY TF: %s | CHART TF: %s",PX_TFToString((ENUM_TIMEFRAMES)tm.entryTimeframe),PX_TFToString(_Period)),(tm.entryTimeframe>0 && tm.entryTimeframe!=(int)_Period?(color)0x80D7FF:(color)0xD0D0D0),11); y+=20;
 
-   PX2_Label("SEC_PROTECT",x+14,y,"6. PROTECTION STATUS",(color)0xE8E8E8,11,"Segoe UI"); y+=19;
-   PX2_Label("ORDER_EARLY",x+34,y,StringFormat("EARLY LOCK: %d/3 | BEST: %s",tm.earlyStage,(tm.preTP1Best>0?DoubleToString(tm.preTP1Best,digs):"-")),(color)0x80D7FF,11); y+=18;
-   PX2_Label("ORDER_POSTTP1",x+34,y,StringFormat("POST-TP1: %s | BEST: %s",(tm.postTP1MidLocked?"TP1 LOCKED":"WAIT MID"),(tm.postTP1Best>0?DoubleToString(tm.postTP1Best,digs):"-")),(color)0x80D7FF,11); y+=18;
-   PX2_Label("ORDER_TRAIL",x+34,y,StringFormat("TRAIL: %s",(tm.lastTrail>0?DoubleToString(tm.lastTrail,digs):"waiting/armed by stages")),(color)0x66CCFF,11); y+=18;
-   string dailyText=(tm.dailyLossControlEnabled ? StringFormat("DAILY LOSS: %.2f%% | HALT: %s",tm.dailyLossPct,(tm.dailyHalted?"YES":"NO")) : "DAILY LOSS: OFF");
-   PX2_Label("ORDER_DAILY",x+34,y,dailyText,(tm.dailyHalted?(color)0x8080FF:(color)0xD0D0D0),11); y+=20;
-
-   PX2_Label("SEC_ACTION",x+14,y,"7. LAST ACTION",(color)0xE8E8E8,11,"Segoe UI"); y+=19;
-   PX2_Label("ORDER_ACTION",x+34,y,"LAST: "+PX_TM_ShortAction(tm.lastAction),(color)0xD0D0D0,10);
+   if(enableTradeProtection && tm.enabled)
+   {
+      PX2_Label("SEC_PROTECT",x+14,y,"5. PROTECTION STATUS",(color)0xE8E8E8,11,"Segoe UI"); y+=19;
+      PX2_Label("ORDER_EARLY",x+34,y,StringFormat("EARLY LOCK: %d/3 | BEST: %s",tm.earlyStage,(tm.preTP1Best>0?DoubleToString(tm.preTP1Best,digs):"-")),(color)0x80D7FF,11); y+=18;
+      PX2_Label("ORDER_POSTTP1",x+34,y,StringFormat("POST-TP1: %s | BEST: %s",(tm.postTP1MidLocked?"TP1 LOCKED":"WAIT MID"),(tm.postTP1Best>0?DoubleToString(tm.postTP1Best,digs):"-")),(color)0x80D7FF,11); y+=18;
+      PX2_Label("ORDER_TRAIL",x+34,y,StringFormat("TRAIL: %s",(tm.lastTrail>0?DoubleToString(tm.lastTrail,digs):"waiting/armed by stages")),(color)0x66CCFF,11); y+=18;
+      string dailyText=(tm.dailyLossControlEnabled ? StringFormat("DAILY LOSS: %.2f%% | HALT: %s",tm.dailyLossPct,(tm.dailyHalted?"YES":"NO")) : "DAILY LOSS: OFF");
+      PX2_Label("ORDER_DAILY",x+34,y,dailyText,(tm.dailyHalted?(color)0x8080FF:(color)0xD0D0D0),11); y+=20;
+   }
+   else
+   {
+      PX2_Label("SEC_PROTECT",x+14,y,"5. PROTECTION STATUS: Trade will close by TP/SL",(color)0xFFD8A8,11,"Segoe UI");
+   }
 }
 
 #endif
