@@ -3,6 +3,9 @@
 
 // Shared two-panel geometry. The right order-manager panel is derived from
 // the left panel so it always stays adjacent if the left-panel size changes.
+// The right panel is deliberately narrower than the left panel (compact
+// order/setup view) - keep PX_RIGHT_PNL_W wide enough for its text lines
+// (see PX_TM_RenderOrderPanel) without spilling outside the panel.
 #define PX_PNL_X            5
 #define PX_PNL_Y            18
 #define PX_PNL_W            455
@@ -12,7 +15,7 @@
 #define PX_PNL_GAP          10
 #define PX_RIGHT_PNL_X      (PX_PNL_X+PX_PNL_W+PX_PNL_GAP)
 #define PX_RIGHT_PNL_Y      PX_PNL_Y
-#define PX_RIGHT_PNL_W      PX_PNL_W
+#define PX_RIGHT_PNL_W      365
 #define PX_RIGHT_PNL_H      PX_PNL_H
 #define PX_MAIN_PANEL_BG_NAME "PX_PANEL_BG"
 
