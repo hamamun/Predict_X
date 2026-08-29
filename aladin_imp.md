@@ -60,6 +60,21 @@ TP1-rate, typical dip (MAE), time-to-result.
 - Rehearsal must run chunked (a few hundred bars per pass) so the
   terminal never freezes.
 
+## Interface (what the user sees)
+No new window/panel. Additions to the EXISTING two panels only, each
+built as one movable block-function (the user plans a full layout
+change later — blocks just get repositioned then, no rewrite):
+- Left panel, under SIGNAL: "FUTURE VIEW" block:
+  line 1: Similar N | Win % | TP1 %
+  line 2: typical dip vs planned SL (OK / widen note)
+  gray while bank < 30: "Memory gathering x/30"
+- Left panel, bottom: scorecard line (upgrades the existing
+  "SIGNALS TODAY" line): "Last 30: MED 64% | STR 71% | VSTR 78% | AI on"
+- Left panel, status: "Memory: 1,240 setups" or "building 45%"
+- Right panel: NO new section — REFUSE/RESIZE/GO reasons flow through
+  the EXISTING STATE + LAST ACTION lines (already plumbed).
+Chart objects (arrows/lines) unchanged.
+
 ## Hard rules
 Single symbol, single position. Native MQL5, no external APIs. New
 module prefix PXM_. Own input per power, default OFF, SHOW before
