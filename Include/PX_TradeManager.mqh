@@ -1039,7 +1039,8 @@ void PX_TM_RenderOrderPanel(PX_TradeManagerState &tm,bool showPanel,const PX_Tra
    PX2_Label("ORDER_BE",x+34,y,StringFormat("BREAKEVEN: %.*f",digs,be),(color)0xD0D0D0,11); y+=20;
 
    PX2_Label("SEC_RISK",x+14,y,"3. RISK / REWARD",(color)0xE8E8E8,11,"Segoe UI"); y+=19;
-   PX2_Label("ORDER_RISK",x+34,y,StringFormat("LOT: %.2f | RISK: $%.2f | REWARD: $%.2f",lot,ts.riskMoney,ts.rewardMoney),(color)0xD0D0D0,11); y+=18;
+   PX2_Label("ORDER_LOT",x+34,y,StringFormat("LOT: %.2f",lot),(color)0xD0D0D0,11); y+=18;
+   PX2_Label("ORDER_RISK",x+34,y,StringFormat("RISK: $%.2f | REWARD: $%.2f",ts.riskMoney,ts.rewardMoney),(color)0xD0D0D0,11); y+=18;
    PX2_Label("ORDER_RR",x+34,y,StringFormat("R:R %.2f | METHOD: %s",ts.rr,PX_TM_ShortMethod(ts.methodText)),(color)0xD0D0D0,11); y+=20;
 
    PX2_Label("SEC_STATUS",x+14,y,"4. POSITION STATUS",(color)0xE8E8E8,11,"Segoe UI"); y+=19;
@@ -1056,8 +1057,6 @@ void PX_TM_RenderOrderPanel(PX_TradeManagerState &tm,bool showPanel,const PX_Tra
       PX2_Label("ORDER_EARLY",x+34,y,StringFormat("EARLY LOCK: %d/3 | BEST: %s",tm.earlyStage,(tm.preTP1Best>0?DoubleToString(tm.preTP1Best,digs):"-")),(color)0x80D7FF,11); y+=18;
       PX2_Label("ORDER_POSTTP1",x+34,y,StringFormat("POST-TP1: %s | BEST: %s",(tm.postTP1MidLocked?"TP1 LOCKED":"WAIT MID"),(tm.postTP1Best>0?DoubleToString(tm.postTP1Best,digs):"-")),(color)0x80D7FF,11); y+=18;
       PX2_Label("ORDER_TRAIL",x+34,y,StringFormat("TRAIL: %s",(tm.lastTrail>0?DoubleToString(tm.lastTrail,digs):"waiting/armed by stages")),(color)0x66CCFF,11); y+=18;
-      string dailyText=(tm.dailyLossControlEnabled ? StringFormat("DAILY LOSS: %.2f%% | HALT: %s",tm.dailyLossPct,(tm.dailyHalted?"YES":"NO")) : "DAILY LOSS: OFF");
-      PX2_Label("ORDER_DAILY",x+34,y,dailyText,(tm.dailyHalted?(color)0x8080FF:(color)0xD0D0D0),11); y+=20;
    }
    else
    {
