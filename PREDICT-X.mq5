@@ -45,6 +45,23 @@ input bool             InpSignalAlerts        = false;            // Signal Aler
 input bool             InpTradeLifecycleAlerts= true;             // Trade Opened/Closed Alerts
 input bool             InpTPSLAlerts          = true;             // TP1/TP2/SL Alerts
 
+// --- ALADDIN-IMP memory bank (Phase A: show-only). All acting powers arrive in
+// --- Phase B and default OFF; with everything off the EA behaves exactly as today.
+input bool             InpPXM_Enable          = true;             // Memory: Enable Aladdin memory bank (show-only)
+input bool             InpPXM_ShowFutureView  = true;             // Memory: Show FUTURE VIEW / scorecard / status blocks
+input bool             InpPXM_Rehearse        = true;             // Memory: Build bank from past bars on first run (chunked)
+input int              InpPXM_RehearseBars    = 3000;             // Memory: Rehearsal depth in closed bars
+input int              InpPXM_RehearsePerPass = 200;              // Memory: Rehearsal bars per timer pass (anti-freeze)
+input int              InpPXM_KNeighbors      = 50;               // Memory: k-NN similar setups per lookup
+input int              InpPXM_MinSamples      = 30;               // Memory: Min resolved outcomes before the view is trusted
+input double           InpPXM_SpreadPoints    = 0.0;              // Memory: Typical spread in points (0 = auto)
+
+// ALADDIN-IMP PXM_ modules. Included here (after the inputs) so the modules can
+// read the InpPXM_* inputs directly. They only ADD state + display; live functions
+// are never modified by them.
+#include "Include/PXM_Book.mqh"
+#include "Include/PXM_Rehearse.mqh"
+
 PX_Preset       g_basePreset;
 PX_RegimeState  g_regime;
 PX_Lifecycle    g_lifecycle;
@@ -422,6 +439,11 @@ void PX_OnNewClosedBar()
    bool newSignal=(before==PX_STATE_SCANNING && g_lifecycle.state==PX_STATE_PENDING);
    if(newSignal) g_signalsToday++;
 
+   // ALADDIN-IMP memory check: runs BETWEEN the lifecycle update and the trade setup.
+   // Phase A: k-NN view + live signal logging + outcome bookkeeping. Show-only:
+   // it cannot change scoring, setup, lots or orders.
+   PX_FutureViewCheck(g_lifecycle,newSignal,g_score,g_regime,g_value,g_trend,g_aiFeatures);
+
    MqlTick tick;
    bool tickOk=SymbolInfoTick(_Symbol,tick) && tick.ask>0.0 && tick.bid>0.0 && tick.ask>tick.bid;
    double riskPct=InpRiskPerTradePercent*PX_ModeRiskFactor();
@@ -431,6 +453,7 @@ void PX_OnNewClosedBar()
    {
       PX_CalcTradeSetup(g_setup,g_score.dir,g_score.tier,(double)g_score.total,tick.ask,tick.bid,g_trend.stLine,g_value.vwap,g_smc.orderBlockTop,g_smc.orderBlockBottom,g_smc.hasOB,g_value.atr,ap.slATRMult,ap.tp1ATRMult,ap.tp2ATRMult,riskPct,g_regime.lotFactor,strongMarketAllowed,mediumMarketAllowed,InpUseInitialStopLoss);
       PX_RefreshPendingSetupToCurrentMarket(g_setup,ap,tick.ask,tick.bid,riskPct);
+      PXM_AttachSetup(g_setup); // memory: bind planned entry/SL/TP1/TP2 to the tracked live signal (record only)
    }
    else
       PX_CalcTradeSetup(g_setup,PX_DIR_NONE,PX_TIER_NO_TRADE,0.0,0.0,0.0,0.0,0.0,0.0,0.0,false,0.0,ap.slATRMult,ap.tp1ATRMult,ap.tp2ATRMult,riskPct,0.0,false,false,InpUseInitialStopLoss);
@@ -461,6 +484,10 @@ void PX_OnNewClosedBar()
    PX_DrawRegimeBar(g_regime);
    PX_RenderPanel(InpShowPanel,_Symbol,_Period,g_regime,g_d1,g_d2,g_d3,g_d4,g_d5,g_d6,g_score,g_setup,g_value,g_trend,g_lifecycle,g_basePreset.warning,g_signalsToday,g_winsToday,g_lossesToday,0);
    PX_TM_RenderOrderPanel(g_tm,InpShowPanel,g_setup,g_score,g_lifecycle);
+   // ALADDIN-IMP display blocks (each a movable block-function; reposition by
+   // editing the x/y here when the planned full layout pass happens).
+   if(InpShowPanel)
+      PXM_DrawFutureViewStack(5,757,g_value.atr,(g_setup.valid?g_setup.entry:0.0),(g_setup.valid?g_setup.sl:0.0));
    ChartRedraw(0);
 }
 
@@ -515,6 +542,9 @@ int OnInit()
    PX_TM_Init(g_tm,InpEnableAutoTrading,InpDailyLossLimitPct);
    g_setup.dir=PX_DIR_NONE; g_setup.method=PX_ENTRY_NONE; g_setup.entry=0; g_setup.sl=0; g_setup.tp1=0; g_setup.tp2=0; g_setup.breakeven=0; g_setup.lot=0; g_setup.riskMoney=0; g_setup.rewardMoney=0; g_setup.rr=0; g_setup.methodText="none"; g_setup.valid=false;
    if(!PX_CreateHandles(g_basePreset)) return INIT_FAILED;
+   // ALADDIN-IMP Phase A: memory bank init + chunked rehearsal start (show-only).
+   PXM_Init();
+   PXM_RehearseStart(g_basePreset);
    g_lastBarTime=iTime(_Symbol,_Period,0);
    EventSetTimer(5);
    PX_OnNewClosedBar();
@@ -524,6 +554,7 @@ int OnInit()
 void OnDeinit(const int reason)
 {
    EventKillTimer();
+   PXM_OnDeinitCleanup(); // ALADDIN-IMP: PXM_ objects + rehearsal handles + memory file close
    PX_ReleaseHandles();
    PX_DeleteObjects();
    PX_TM_DeleteObjects();
@@ -564,9 +595,16 @@ void OnTick()
 
 void OnTimer()
 {
+   // ALADDIN-IMP: chunked rehearsal pump (history building; never touches live state).
+   PXM_RehearsePump(g_hST,g_hRSI,g_hADX,g_hATR14,g_hATR100,g_hKC,g_hTTM,g_basePreset);
    PX_DrawRegimeBar(g_regime);
    PX_RenderPanel(InpShowPanel,_Symbol,_Period,g_regime,g_d1,g_d2,g_d3,g_d4,g_d5,g_d6,g_score,g_setup,g_value,g_trend,g_lifecycle,g_basePreset.warning,g_signalsToday,g_winsToday,g_lossesToday,0);
    PX_TM_RenderOrderPanel(g_tm,InpShowPanel,g_setup,g_score,g_lifecycle);
+   if(InpShowPanel)
+   {
+      PXM_DrawFutureViewStack(5,757,g_value.atr,(g_setup.valid?g_setup.entry:0.0),(g_setup.valid?g_setup.sl:0.0));
+      ChartRedraw(0);
+   }
 }
 
 void OnTradeTransaction(const MqlTradeTransaction &trans,const MqlTradeRequest &request,const MqlTradeResult &result)
@@ -584,6 +622,7 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,const MqlTradeRequest &
 
    if(entry==DEAL_ENTRY_IN)
    {
+      PXM_OnTradeOpened(price,volume); // memory: record real fill for the tracked live signal (record only)
       if(InpTradeLifecycleAlerts)
          PX4_SendAlert(InpPushNotifications,InpPopupAlerts,InpSoundAlerts,StringFormat("Trade opened on %s | %s %.2f @ %.5f",_Symbol,(dealType==DEAL_TYPE_BUY?"BUY":"SELL"),volume,price));
       return;
@@ -598,12 +637,14 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,const MqlTradeRequest &
    if(positionStillOpen)
    {
       // Partial close, normally TP1.
+      PXM_OnTradePartialTP1(profit); // memory: TP1 partial outcome backfill (record only)
       if(InpTPSLAlerts)
          PX4_SendAlert(InpPushNotifications,InpPopupAlerts,InpSoundAlerts,StringFormat("TP1 / partial close on %s | %.2f lots | P/L $%.2f",_Symbol,volume,profit));
       return;
    }
 
    if(profit>=0.0) g_winsToday++; else g_lossesToday++;
+   PXM_OnTradeClosed(profit,(reason==DEAL_REASON_TP)); // memory: final outcome backfill (record only)
    PX_TM_ClearPersistence();
 
    bool reasonTP=(reason==DEAL_REASON_TP);
