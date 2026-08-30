@@ -660,8 +660,10 @@ void OnTick()
 {
    PX_CheckInstantPendingFlip();
    double liveSTDir=0.0;
-   if(PX_Copy1(g_hST,1,0,liveSTDir)) PX_TM_OnInstantTick(g_tm,InpEnableAutoTrading,(InpEnableTradeProtection && InpActivePredictionMonitor),(liveSTDir>0?1:(liveSTDir<0?-1:0)));
-   if(InpEnableAutoTrading && InpEnableTradeProtection)
+   if(PX_Copy1(g_hST,1,0,liveSTDir)) PX_TM_OnInstantTick(g_tm,(InpEnableTradeProtection && InpActivePredictionMonitor),(liveSTDir>0?1:(liveSTDir<0?-1:0)));
+   // Tick-level protection is NOT linked to AUTO TRADE: with auto OFF the EA
+   // opens nothing new, but still guards its existing position.
+   if(InpEnableTradeProtection)
    {
       PX_TM_ApplyEarlyProfitLock(g_tm);
       PX_TM_CheckTP1(g_tm);

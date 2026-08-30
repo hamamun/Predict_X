@@ -320,7 +320,7 @@ void PX_RenderPanel(bool showPanel,string symbol,ENUM_TIMEFRAMES tf,const PX_Reg
    int y=52;
 
    // ---- Core toggle statuses (only the ones that matter) ----
-   PX_Label("TOG_AUTO",14,y,"AUTO TRADE "+(autoTradingOn?"ON":"OFF"),(autoTradingOn?clrLime:clrTomato),10,"Segoe UI","Master switch. When ON the EA may place and manage trades automatically.");
+   PX_Label("TOG_AUTO",14,y,"AUTO TRADE "+(autoTradingOn?"ON":"OFF"),(autoTradingOn?clrLime:clrTomato),10,"Segoe UI","Master switch for NEW trades. OFF = the EA places nothing new, but trade protection still guards its existing open position and pending order (see the PROTECTION switches).");
    PX_Label("TOG_REST",150,y,togglesRest,clrSilver,9,"Consolas","Core protection/display switches.");
    y+=20;
 
