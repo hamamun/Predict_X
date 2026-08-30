@@ -28,6 +28,8 @@ enum PX_TradingMode { PX_MODE_CONSERVATIVE=0, PX_MODE_NORMAL=1, PX_MODE_AGGRESSI
 input bool             InpEnableAutoTrading   = false;            // Enable Auto Trading - Phase 2 master switch
 input bool             InpUseInitialStopLoss  = false;            // Use Initial Stop Loss on Order Placement
 input bool             InpEnableTradeProtection = true;           // Enable Trade Protection
+input double           InpProtectTriggerPctOfRisk = 1.0;          // Staircase: arm protection when floating P/L reaches this % of risk
+input double           InpProtectGivebackPct = 30.0;              // Staircase: in-bucket close when price gives back this % from peak
 input double           InpRiskPerTradePercent = 1.0;              // Risk Per Trade (%)
 input PX_TradingMode   InpTradingMode         = PX_MODE_NORMAL;   // Trading Mode
 input bool             InpAutoAdjustSettings  = true;             // Auto-Adjust Settings
@@ -668,6 +670,12 @@ void OnTick()
       PX_TM_ApplyEarlyProfitLock(g_tm);
       PX_TM_CheckTP1(g_tm);
       PX_TM_ApplyPostTP1GivebackTrail(g_tm);
+      // Staircase protection: arm when floating P/L reaches the trigger, then
+      // run the in-bucket giveback/lock close on every tick. The new logic is
+      // purely additive: PX_TM_ApplyStaircaseProtection and
+      // PX_TM_ArmStaircaseIfReady are no-ops unless the staircase is armed.
+      PX_TM_ArmStaircaseIfReady(g_tm,InpProtectTriggerPctOfRisk,g_setup.riskMoney);
+      PX_TM_ApplyStaircaseProtection(g_tm,InpProtectTriggerPctOfRisk,InpProtectGivebackPct);
    }
    datetime cur=iTime(_Symbol,_Period,0);
    if(InpShowPanel)
