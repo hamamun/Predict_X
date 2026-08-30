@@ -323,7 +323,7 @@ void PX_RenderPanel(bool showPanel,string symbol,ENUM_TIMEFRAMES tf,const PX_Reg
 
    // ---- Header band: title + symbol + timeframe compatibility chip (top-right) ----
    PX_Rect("HDR_BG",PX_PNL_X,PX_PNL_Y,g_pxMainPanelW,26,(color)0x141414,clrDimGray,"PREDICT-X header: title, symbol and timeframe compatibility.");
-   PX_Label("HDR_TITLE",14,23,"PREDICT-X v3.0",clrAqua,11,"Segoe UI");
+   PX_Label("HDR_TITLE",14,23,"PREDICT-X v2.0",clrAqua,11,"Segoe UI");
    PX_Label("HDR_SYMBOL",150,23,symbol,clrWhite,12,"Segoe UI");
    color tfClr; string tfChip=PX_TFCompatText(tf,tfClr);
    int tfX=g_pxMainPanelW-170; if(tfX<280) tfX=280;
