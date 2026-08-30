@@ -1,9 +1,11 @@
 //+------------------------------------------------------------------+
-//|                                                     PREDICT-X.mq5 |
-//| Phase 2: prediction engine + automated order management.          |
+//|                                                    PREDICT-X.mq5 |
+//|  PREDICT-X v2.00 - 6-layer prediction engine, automated order    |
+//|  management, and the Aladin memory bank (rehearsal, k-NN         |
+//|  Future View, Phase B trade actions).                            |
 //+------------------------------------------------------------------+
 #property copyright "PREDICT-X"
-#property version   "1.00"
+#property version   "2.00"
 #property strict
 
 #include "Include/PX_AutoPreset.mqh"

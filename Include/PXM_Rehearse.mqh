@@ -1,6 +1,6 @@
 //+------------------------------------------------------------------+
 //|                                                  PXM_Rehearse.mqh |
-//| ALADDIN rehearsal engine (builds memory bank from past bars).             |
+//| ALADDIN rehearsal engine (builds memory bank from past bars).  [PREDICT-X v2.00]             |
 //|                                                                  |
 //| Runs the scoring math over MT5's OWN past closed bars to build   |
 //| the memory bank's history. Layer1 (SMC) and Layer5 (Markov) in   |

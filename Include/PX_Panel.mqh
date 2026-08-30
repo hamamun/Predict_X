@@ -1,3 +1,4 @@
+// PREDICT-X v2.00  -  PX_Panel.mqh
 #ifndef __PX_PANEL_MQH__
 #define __PX_PANEL_MQH__
 #include "PX_Scoring.mqh"

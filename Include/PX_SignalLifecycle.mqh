@@ -1,3 +1,4 @@
+// PREDICT-X v2.00  -  PX_SignalLifecycle.mqh
 #ifndef __PX_SIGNAL_LIFECYCLE_MQH__
 #define __PX_SIGNAL_LIFECYCLE_MQH__
 #include "PX_Scoring.mqh"

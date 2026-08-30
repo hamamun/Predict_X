@@ -1,6 +1,6 @@
 //+------------------------------------------------------------------+
 //|                                                     PXM_Book.mqh |
-//| ALADDIN memory bank + Phase B trade actions.                     |
+//| ALADDIN memory bank + Phase B trade actions.  [PREDICT-X v2.00]                     |
 //|                                                                  |
 //| One plain CSV file per symbol+TF in MQL5\Files:                  |
 //|   row kinds: 1=rehearsal result (PXM_Rehearse),                  |

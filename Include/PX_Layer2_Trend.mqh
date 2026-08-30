@@ -1,3 +1,4 @@
+// PREDICT-X v2.00  -  PX_Layer2_Trend.mqh
 #ifndef __PX_LAYER2_TREND_MQH__
 #define __PX_LAYER2_TREND_MQH__
 #include "PX_Scoring.mqh"

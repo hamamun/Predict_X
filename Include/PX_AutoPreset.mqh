@@ -1,3 +1,4 @@
+// PREDICT-X v2.00  -  PX_AutoPreset.mqh
 #ifndef __PX_AUTOPRESET_MQH__
 #define __PX_AUTOPRESET_MQH__
 

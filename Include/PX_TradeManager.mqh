@@ -1,3 +1,4 @@
+// PREDICT-X v2.00  -  PX_TradeManager.mqh
 #ifndef __PX_TRADEMANAGER_MQH__
 #define __PX_TRADEMANAGER_MQH__
 
