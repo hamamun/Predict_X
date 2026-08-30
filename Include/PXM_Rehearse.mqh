@@ -1,6 +1,6 @@
 //+------------------------------------------------------------------+
 //|                                                  PXM_Rehearse.mqh |
-//| ALADDIN-IMP Phase A, module 2: the rehearsal engine.             |
+//| ALADDIN rehearsal engine (builds memory bank from past bars).             |
 //|                                                                  |
 //| Runs the scoring math over MT5's OWN past closed bars to build   |
 //| the memory bank's history. Layer1 (SMC) and Layer5 (Markov) in   |
@@ -652,8 +652,7 @@ bool PXM_RhSimulate(const int b,const PXM_RhSim &s,const PX_Preset &ap,
 //+------------------------------------------------------------------+
 void PXM_RhProcessBar(const int b,const int hST,const int hRSI,const int hADX,const int hATR14,const int hATR100,const int hKC,const int hTTM,const PX_Preset &base)
 {
-   double spreadPts=InpPXM_SpreadPoints;
-   if(spreadPts<=0.0) spreadPts=(double)SymbolInfoInteger(_Symbol,SYMBOL_SPREAD);
+   double spreadPts=PXM_AutoSpreadPoints();
    PXM_RhSim s;
    s.dir=PX_DIR_NONE; s.total=0; s.tier=0;
    s.l1=s.l2=s.l3=s.l4=s.l5=s.l6=s.candle=0;
@@ -695,22 +694,22 @@ void PXM_RhProcessBar(const int b,const int hST,const int hRSI,const int hADX,co
 //+------------------------------------------------------------------+
 void PXM_RehearseStart(const PX_Preset &base)
 {
-   if(!InpPXM_Enable || !InpPXM_Rehearse) return;
+   if(!InpEnableAladin) return;
    if(g_pxmFile<0) return;
    if(g_pxmRhActive) return;
    if(GlobalVariableCheck(PXM_GV("rehearseDone")) || g_pxmRhRowsLoaded>0)
    {
       if(!GlobalVariableCheck(PXM_GV("rehearseDone"))) GlobalVariableSet(PXM_GV("rehearseDone"),1.0);
-      Print("PREDICT-X MEM: rehearsal already completed before - skipping (bank has ",g_pxmCount," rows).");
+      Print("PREDICT-X ALADIN: rehearsal already completed before - skipping (bank has ",g_pxmCount," rows).");
       return;
    }
-   if(InpPXM_RehearseBars<=0) return;
+   if(PXM_REHEARSE_BARS<=0) return;
    int avail=iBars(_Symbol,_Period);
-   int bMax=MathMin(InpPXM_RehearseBars,avail-2);
+   int bMax=MathMin(PXM_REHEARSE_BARS,avail-2);
    int bMin=PXM_SIM_BARS+1;
    if(bMax<bMin+25)
    {
-      Print("PREDICT-X MEM: not enough loaded history for rehearsal yet (bars=",avail,"). It will start automatically once history is loaded.");
+      Print("PREDICT-X ALADIN: not enough loaded history for rehearsal yet (bars=",avail,"). It will start automatically once history is loaded.");
       return;
    }
    // persistent HTF SuperTrend handles for the shifted Layer4 replica
@@ -728,8 +727,8 @@ void PXM_RehearseStart(const PX_Preset &base)
    g_pxmRhTotal=bMax-bMin+1;
    g_pxmRhDone=0;
    g_pxmRhRows=0;
-   Print("PREDICT-X MEM: rehearsal started - ",g_pxmRhTotal," bars (shift ",bMin,"..",bMax,"), ",
-         InpPXM_RehearsePerPass," bars/pass, chunked to keep the terminal responsive.");
+   Print("PREDICT-X ALADIN: rehearsal started - ",g_pxmRhTotal," bars (shift ",bMin,"..",bMax,"), ",
+         PXM_REHEARSE_PER_PASS," bars/pass, chunked to keep the terminal responsive.");
 }
 
 void PXM_RehearseReleaseHandles()
@@ -760,7 +759,7 @@ void PXM_OnDeinitCleanup()
 //--- called from OnTimer only. Never touches live scoring/trading state.
 void PXM_RehearsePump(const int hST,const int hRSI,const int hADX,const int hATR14,const int hATR100,const int hKC,const int hTTM,const PX_Preset &base)
 {
-   if(!InpPXM_Enable || !InpPXM_Rehearse) return;
+   if(!InpEnableAladin) return;
    if(!g_pxmRhActive)
    {
       // auto-(re)start when history finished loading after init
@@ -771,7 +770,7 @@ void PXM_RehearsePump(const int hST,const int hRSI,const int hADX,const int hATR
    long t0=(long)GetMicrosecondCount();
    int processed=0;
    int avail=iBars(_Symbol,_Period);
-   while(g_pxmRhActive && processed<InpPXM_RehearsePerPass && ((long)GetMicrosecondCount()-t0)<PXM_RH_BUDGET_US)
+   while(g_pxmRhActive && processed<PXM_REHEARSE_PER_PASS && ((long)GetMicrosecondCount()-t0)<PXM_RH_BUDGET_US)
    {
       int b=g_pxmRhCursor;
       if(b<g_pxmRhBMin) break;

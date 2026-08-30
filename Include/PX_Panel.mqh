@@ -93,9 +93,10 @@ string PX_WrapTooltip(string text,int width=58)
 //+------------------------------------------------------------------+
 // Shared left/right panel coordinates live in PX_PanelGeometry.mqh so the
 // order-manager panel can stay adjacent to this main panel.
-// Detail blocks that may span several lines (FUTURE VIEW / SUMMARY /
-// LAST ACTION) are capped at this many lines.
+// Detail blocks that may span several lines (SUMMARY / LAST ACTION).
 #define PX_DETAIL_MAX_LINES 3
+// Aladin step block is allowed more lines so every action step is visible.
+#define PX_ALADIN_MAX_LINES 12
 // Approximate width of one character of the panel's monospace font, in
 // pixels, per font point (Consolas is ~0.55 em wide; points -> px is x1.333).
 // MQL5 offers no text-metrics call for chart objects, so this is calibrated
@@ -111,9 +112,12 @@ double PX_CharPx(const int fontSize)
 }
 
 // How many characters of this font size fit on one line of the left panel.
-int PX_FitChars(const int fontSize,const int x=PX_TEXT_X,const int widthPx=PX_PNL_W)
+// Default width uses the live dynamic panel width (g_pxMainPanelW).
+int PX_FitChars(const int fontSize,const int x=PX_TEXT_X,const int widthPx=-1)
 {
-   int avail=widthPx-(x-PX_PNL_X)-PX_TEXT_PAD_R;
+   int w=(widthPx>0?widthPx:g_pxMainPanelW);
+   if(w<PX_PNL_W_MIN) w=PX_PNL_W_MIN;
+   int avail=w-(x-PX_PNL_X)-PX_TEXT_PAD_R;
    if(avail<40) avail=40;
    int n=(int)MathFloor((double)avail/PX_CharPx(fontSize));
    return (n<16?16:n);
@@ -301,21 +305,28 @@ void PX_RenderDetail(int &y,const PX_ScoreDetail &d)
    y+=6;
 }
 
-void PX_RenderPanel(bool showPanel,string symbol,ENUM_TIMEFRAMES tf,const PX_RegimeState &reg,const PX_ScoreDetail &l1,const PX_ScoreDetail &l2,const PX_ScoreDetail &l3,const PX_ScoreDetail &l4,const PX_ScoreDetail &l5,const PX_ScoreDetail &l6,const PX_ScoreResult &sr,const PX_DisplayState &ds,const PX_TradeSetup &ts,const PX_ValueContext &vc,const PX_TrendContext &tc,const PX_Lifecycle &lc,string warning,int signalsToday,int wins,int losses,int streak,const bool autoTradingOn,const string togglesRest,const string fvStatus,const string summary,const string lastAction,const string lastActionTime)
+void PX_RenderPanel(bool showPanel,string symbol,ENUM_TIMEFRAMES tf,const PX_RegimeState &reg,const PX_ScoreDetail &l1,const PX_ScoreDetail &l2,const PX_ScoreDetail &l3,const PX_ScoreDetail &l4,const PX_ScoreDetail &l5,const PX_ScoreDetail &l6,const PX_ScoreResult &sr,const PX_DisplayState &ds,const PX_TradeSetup &ts,const PX_ValueContext &vc,const PX_TrendContext &tc,const PX_Lifecycle &lc,string warning,int signalsToday,int wins,int losses,int streak,const bool autoTradingOn,const string togglesRest,const string fvStatus,const string aladinBody,const string summary,const string lastAction,const string lastActionTime)
 {
    PX_DeletePanelObjects();
    if(!showPanel) return;
 
+   // ---- Dynamic width: grow a bit when Aladin step text is long so lines fit.
+   int wantW=PX_PNL_W_MIN;
+   if(StringLen(aladinBody)>160 || StringLen(fvStatus)>90) wantW=MathMin(PX_PNL_W_MAX, PX_PNL_W_MIN+80);
+   g_pxMainPanelW=wantW;
+   g_pxMainPanelH=PX_PNL_H_MIN; // height re-fitted at the end
+
    // ---- Full panel background (height is re-fitted at the end, once the
    //      wrapped detail blocks know how many lines they needed) ----
-   PX_Rect("PANEL_BG",PX_PNL_X,PX_PNL_Y,PX_PNL_W,PX_PNL_H,(color)0x101010,clrDimGray,"PREDICT-X main decision panel.");
+   PX_Rect("PANEL_BG",PX_PNL_X,PX_PNL_Y,g_pxMainPanelW,g_pxMainPanelH,(color)0x101010,clrDimGray,"PREDICT-X main decision panel.");
 
    // ---- Header band: title + symbol + timeframe compatibility chip (top-right) ----
-   PX_Rect("HDR_BG",PX_PNL_X,PX_PNL_Y,PX_PNL_W,26,(color)0x141414,clrDimGray,"PREDICT-X header: title, symbol and timeframe compatibility.");
+   PX_Rect("HDR_BG",PX_PNL_X,PX_PNL_Y,g_pxMainPanelW,26,(color)0x141414,clrDimGray,"PREDICT-X header: title, symbol and timeframe compatibility.");
    PX_Label("HDR_TITLE",14,23,"PREDICT-X v3.0",clrAqua,11,"Segoe UI");
    PX_Label("HDR_SYMBOL",150,23,symbol,clrWhite,12,"Segoe UI");
    color tfClr; string tfChip=PX_TFCompatText(tf,tfClr);
-   PX_Label("HDR_TFCOMP",290,23,tfChip,tfClr,9,"Consolas","Timeframe compatibility mode. If the chart timeframe is not one the EA runs on natively, it shows the EA's working timeframe so you know which timeframe to attach it to.");
+   int tfX=g_pxMainPanelW-170; if(tfX<280) tfX=280;
+   PX_Label("HDR_TFCOMP",tfX,23,tfChip,tfClr,9,"Consolas","Timeframe compatibility mode. If the chart timeframe is not one the EA runs on natively, it shows the EA's working timeframe so you know which timeframe to attach it to.");
 
    int y=52;
 
@@ -473,27 +484,38 @@ void PX_RenderPanel(bool showPanel,string symbol,ENUM_TIMEFRAMES tf,const PX_Reg
    }
    y+=4;
 
-   // ---- Future view status (simple language) ----
-   // Wrapping instead of clipping: MT5 labels cannot word-wrap, so the block
-   // is laid out as up to PX_DETAIL_MAX_LINES label lines (see PX_WrapText).
-   PX_Label("FV_H",14,y,"-- FUTURE VIEW ----------------------------",clrAqua,10,"Segoe UI"); y+=15;
-   y=PX_RenderWrappedLines("FV1",PX_TEXT_X,y,fvStatus,clrSilver,9,"Consolas","How similar past setups on this symbol+TF ended. Show-only - never changes a trade.")+4;
+   // ---- ALADIN / FUTURE VIEW (status + step-by-step actions) ----
+   // Color from the short status text (panel does not include PXM_Book).
+   color alClr=clrAqua;
+   if(StringFind(fvStatus,"off")>=0 || StringFind(fvStatus,"OFF")>=0) alClr=clrGray;
+   else if(StringFind(fvStatus,"fail")>=0 || StringFind(fvStatus,"FAILED")>=0 || StringFind(fvStatus,"Failed")>=0) alClr=clrOrange;
+   else if(StringFind(fvStatus,"REFUSE")>=0) alClr=clrTomato;
+   else if(StringFind(fvStatus,"active")>=0 || StringFind(fvStatus,"Active")>=0) alClr=clrLime;
+   else if(StringFind(fvStatus,"learning")>=0 || StringFind(fvStatus,"Learning")>=0) alClr=clrGold;
+   PX_Label("FV_H",14,y,"-- ALADIN / FUTURE VIEW -------------------",alClr,10,"Segoe UI"); y+=15;
+   y=PX_RenderWrappedLines("FV1",PX_TEXT_X,y,fvStatus,alClr,9,"Consolas","Aladin memory verdict for this bar. OFF = classic EA. FAILED = classic fallback. LEARNING = show only. ACTIVE = Phase B actions may change SL/TP, lot, entry, or refuse.",0,4)+2;
+   string body=(aladinBody!=""?aladinBody:"Status: -");
+   y=PX_RenderWrappedLines("ALB",PX_TEXT_X,y,body,clrSilver,9,"Consolas","Each Aladin step for this bar. When all powers are armed the headline says Aladin active.",0,PX_ALADIN_MAX_LINES)+6;
 
    // ---- Summary (why / what / how) ----
    PX_Label("SUM_H",14,y,"-- SUMMARY -------------------------------",clrWhite,10,"Segoe UI"); y+=15;
-   y=PX_RenderWrappedLines("SUM1",PX_TEXT_X,y,summary,clrGold,9,"Consolas","Plain-language explanation of what the engine sees and why.")+PX_LineHeight(9);
+   y=PX_RenderWrappedLines("SUM1",PX_TEXT_X,y,summary,clrGold,9,"Consolas","Plain-language explanation of what the engine sees and why.",0,4)+PX_LineHeight(9);
 
    // ---- Last action (real time) ----
    PX_Label("ACT_H",14,y,"-- LAST ACTION ---------------------------",clrWhite,10,"Segoe UI"); y+=15;
-   y=PX_RenderWrappedLines("ACT1",PX_TEXT_X,y,StringFormat("%s %s",lastActionTime,lastAction),clrSilver,10,"Consolas","The most recent action the engine took, with a live timestamp.");
+   y=PX_RenderWrappedLines("ACT1",PX_TEXT_X,y,StringFormat("%s %s",lastActionTime,lastAction),clrSilver,10,"Consolas","The most recent action the engine took, with a live timestamp.",0,3);
 
    // ---- Today's summary line (small) ----
    PX_Label("TODAY",14,y,StringFormat("Today: %d signal%s | %d win | %d loss",signalsToday,(signalsToday==1?"":"s"),wins,losses),clrDimGray,9,"Consolas","Today's signal/win/loss counts.");
+   y+=PX_LineHeight(9)+8;
 
-   // ---- Fit the background to the content: single-line details keep the
-   //      panel exactly as tall as before; wrapped details grow it. ----
-   int need=y+PX_LineHeight(9)+16-PX_PNL_Y;
-   ObjectSetInteger(0,PX_OBJ_PREFIX+"PANEL_BG",OBJPROP_YSIZE,(need>PX_PNL_H?need:PX_PNL_H));
+   // ---- Fit background height/width to content (dynamic left panel). ----
+   int need=y+16-PX_PNL_Y;
+   if(need<PX_PNL_H_MIN) need=PX_PNL_H_MIN;
+   g_pxMainPanelH=need;
+   ObjectSetInteger(0,PX_OBJ_PREFIX+"PANEL_BG",OBJPROP_YSIZE,g_pxMainPanelH);
+   ObjectSetInteger(0,PX_OBJ_PREFIX+"PANEL_BG",OBJPROP_XSIZE,g_pxMainPanelW);
+   ObjectSetInteger(0,PX_OBJ_PREFIX+"HDR_BG",OBJPROP_XSIZE,g_pxMainPanelW);
 }
 
 void PX_DrawRegimeBar(const PX_RegimeState &reg)
