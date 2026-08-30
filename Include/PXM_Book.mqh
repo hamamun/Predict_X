@@ -1,6 +1,6 @@
 //+------------------------------------------------------------------+
 //|                                                     PXM_Book.mqh |
-//| ALADDIN-IMP Phase A, module 1: the memory bank.                  |
+//| ALADDIN memory bank + Phase B trade actions.                     |
 //|                                                                  |
 //| One plain CSV file per symbol+TF in MQL5\Files:                  |
 //|   row kinds: 1=rehearsal result (PXM_Rehearse),                  |
@@ -11,8 +11,10 @@
 //| k-NN lookup on the SAME 12-feature vector the online AI uses    |
 //| returns: win%, TP1%, typical dip (MAE in ATR), time-to-result.   |
 //|                                                                  |
-//| PHASE A IS SHOW-ONLY. Nothing in this module changes scoring,   |
-//| setup, lots or orders. Live functions are never modified.       |
+//| Master switch: InpEnableAladin. When ON and memory is ready,    |
+//| Phase B may: smarter SL/TP, refuse weak history, resize lot,    |
+//| stronger entry (GO). File/lookup failure falls back to classic  |
+//| PREDICT-X behaviour and the panel shows the failure clearly.    |
 //| Uses its own GV keys (PREDICTX.MEM.*) - no collision with       |
 //| PREDICTX.<magic>.* (TradeManager) or PREDICTX.ONLINEAI.* keys.  |
 //+------------------------------------------------------------------+
@@ -29,16 +31,40 @@
 #include "PX_Panel.mqh"
 #include "PX_TradeManager.mqh"
 
-#define PXM_NCOLS        30
-#define PXM_MAX_ROWS     200000
-#define PXM_SCAN_CAP     60000
-#define PXM_SIM_BARS     40
-#define PXM_RESULT_NONE  0
-#define PXM_RESULT_SL    1
-#define PXM_RESULT_TP1   2
-#define PXM_RESULT_TP2   3
-#define PXM_RESULT_BE    4
-#define PXM_RESULT_TMO   5
+//--- single-switch internal standards (no user inputs for these)
+#define PXM_NCOLS              30
+#define PXM_MAX_ROWS           200000
+#define PXM_SCAN_CAP           60000
+#define PXM_SIM_BARS           40
+#define PXM_REHEARSE_BARS      3000
+#define PXM_REHEARSE_PER_PASS  200
+#define PXM_K_NEIGHBORS        50
+#define PXM_MIN_SAMPLES        30
+#define PXM_REFUSE_WIN_PCT     45.0
+#define PXM_LUKEWARM_WIN_PCT   55.0
+#define PXM_GO_WIN_PCT         62.0
+#define PXM_GO_TP1_PCT         70.0
+#define PXM_HALF_LOT_FACTOR    0.50
+#define PXM_GO_EXPIRY_BONUS    2
+#define PXM_SL_DIP_PAD_ATR     0.15
+#define PXM_SL_MIN_ATR         0.80
+#define PXM_SL_MAX_ATR         3.20
+#define PXM_RESULT_NONE        0
+#define PXM_RESULT_SL          1
+#define PXM_RESULT_TP1         2
+#define PXM_RESULT_TP2         3
+#define PXM_RESULT_BE          4
+#define PXM_RESULT_TMO         5
+
+//--- action / panel mode for the Aladin section
+enum PXM_Mode
+{
+   PXM_MODE_OFF=0,
+   PXM_MODE_FAILED=1,
+   PXM_MODE_LEARNING=2,
+   PXM_MODE_READY=3,
+   PXM_MODE_ACTIVE=4
+};
 
 //--- in-memory row (matches the CSV layout one-to-one)
 struct PXM_Row
@@ -68,6 +94,29 @@ struct PXM_View
    bool   ready;
 };
 
+//--- Phase B action report for this bar (also drives the panel Aladin section)
+struct PXM_Action
+{
+   PXM_Mode mode;
+   bool   refused;          // weak history -> block this setup
+   bool   resizedLot;       // lukewarm history -> half lot factor
+   bool   widenedSL;        // typical dip > planned SL -> widen
+   bool   smartSLTP;        // SL/TP rewritten from measured memory
+   bool   goMarket;         // stronger entry: limit -> market allowed
+   bool   goExpiry;         // stronger entry: extra pending bars
+   bool   fellBack;         // file/lookup failed -> classic EA path
+   double lotFactor;        // extra lot multiplier (<=1.0; never raises risk)
+   int    expiryBonus;      // extra bars added to pending expiry
+   string stepMemory;       // panel step lines
+   string stepLookup;
+   string stepSLTP;
+   string stepRefuse;
+   string stepResize;
+   string stepGO;
+   string headline;         // short status for the section header
+   string reason;           // one-line why (also useful for Experts log)
+};
+
 //--- live signal awaiting outcome
 struct PXM_LivePend
 {
@@ -88,6 +137,7 @@ int        g_pxmCount=0, g_pxmResolved=0, g_pxmRhRowsLoaded=0;
 int        g_pxmFile=-1;
 string     g_pxmFileDisplay="";
 PXM_View   g_pxmView;
+PXM_Action g_pxmAct;
 PXM_LivePend g_pxmPend;
 bool       g_pxmPendActive=false;
 int        g_pxmErr=0;
@@ -101,35 +151,85 @@ void PXM_ResetView(PXM_View &v)
    v.n=0; v.winPct=0.0; v.tp1Pct=0.0; v.maeATR=0.0; v.avgBars=0.0; v.ready=false;
 }
 
+void PXM_ResetAction(PXM_Action &a)
+{
+   a.mode=PXM_MODE_OFF;
+   a.refused=false; a.resizedLot=false; a.widenedSL=false;
+   a.smartSLTP=false; a.goMarket=false; a.goExpiry=false; a.fellBack=false;
+   a.lotFactor=1.0; a.expiryBonus=0;
+   a.stepMemory=""; a.stepLookup=""; a.stepSLTP="";
+   a.stepRefuse=""; a.stepResize=""; a.stepGO="";
+   a.headline="Aladin off"; a.reason="";
+}
+
+// Auto spread in points for this symbol (dynamic; no user input).
+double PXM_AutoSpreadPoints(const double fallbackPts=0.0)
+{
+   double sp=(double)SymbolInfoInteger(_Symbol,SYMBOL_SPREAD);
+   if(sp>0.0) return sp;
+   if(fallbackPts>0.0) return fallbackPts;
+   return 0.0;
+}
+
+// True when Aladin may act on trading (ON + file OK + enough similar ready samples).
+bool PXM_CanAct()
+{
+   return (InpEnableAladin && g_pxmFile>=0 && g_pxmView.ready && g_pxmView.n>=PXM_MIN_SAMPLES && !g_pxmAct.fellBack);
+}
+
 //+------------------------------------------------------------------+
-//| Plain-language FUTURE VIEW status for the main panel (item 9).   |
-//| Tells the user what condition the memory view is in right now.   |
-//| Show-only; never changes a trade.                                |
+//| Plain-language Aladin / FUTURE VIEW status for the main panel.   |
+//| Shows OFF / FAILED / LEARNING / ACTIVE and the current steps.    |
 //+------------------------------------------------------------------+
 string PXM_FutureViewStatus(const double atr,const double entry,const double sl)
 {
-   if(!InpPXM_Enable) return "Future view is off.";
-   if(!InpPXM_ShowFutureView) return "Future view display off.";
+   if(!InpEnableAladin) return "Aladin off.";
+   if(g_pxmAct.fellBack || g_pxmFile<0)
+      return (g_pxmAct.reason!=""?g_pxmAct.reason:"Aladin failed - using classic EA path.");
    if(g_pxmRhActive)
    {
       int pct=(g_pxmRhTotal>0?(int)MathRound(100.0*g_pxmRhDone/(double)g_pxmRhTotal):0);
-      return "Learning - building history ("+IntegerToString(pct)+"% / "+IntegerToString(g_pxmCount)+" setups).";
+      return "Aladin learning - building history ("+IntegerToString(pct)+"% / "+IntegerToString(g_pxmCount)+" setups). Actions wait until ready.";
    }
-   if(g_pxmResolved<InpPXM_MinSamples)
-      return "Learning - needs "+IntegerToString(InpPXM_MinSamples)+" similar outcomes before it gives a view.";
+   if(g_pxmResolved<PXM_MIN_SAMPLES)
+      return "Aladin learning - needs "+IntegerToString(PXM_MIN_SAMPLES)+" resolved outcomes before actions arm. Bank: "+IntegerToString(g_pxmResolved)+".";
    if(g_pxmView.n<=0)
-      return "No similar setups found for this signal yet.";
+      return "Aladin ready - no similar setups for this signal yet (classic path this bar).";
 
-   string txt=StringFormat("Confident - similar %d won %d of 100.",g_pxmView.n,(int)MathRound(g_pxmView.winPct));
+   string txt=StringFormat("Aladin active - similar %d | win %.0f%% | TP1 %.0f%% | dip %.1f ATR.",
+                           g_pxmView.n,g_pxmView.winPct,g_pxmView.tp1Pct,g_pxmView.maeATR);
+   if(g_pxmAct.refused) txt+=" REFUSED.";
+   else
+   {
+      if(g_pxmAct.smartSLTP) txt+=" SL/TP tuned.";
+      if(g_pxmAct.resizedLot) txt+=" Lot resized.";
+      if(g_pxmAct.goMarket || g_pxmAct.goExpiry) txt+=" Stronger entry.";
+      if(!g_pxmAct.smartSLTP && !g_pxmAct.resizedLot && !g_pxmAct.goMarket && !g_pxmAct.goExpiry)
+         txt+=" History OK - no change needed.";
+   }
    if(atr>0.0 && entry>0.0 && sl>0.0 && MathAbs(entry-sl)>0.0)
    {
       double slATR=MathAbs(entry-sl)/atr;
-      if(g_pxmView.maeATR>slATR)
-         txt+="  Caution: dips past stop.";
-      else
-         txt+="  Usual dip fits the stop.";
+      if(g_pxmView.maeATR>slATR) txt+=" Dip note: history dipped past stop.";
    }
    return txt;
+}
+
+// Multi-line Aladin section body for the left panel (steps + headline).
+string PXM_AladinPanelBody()
+{
+   if(!InpEnableAladin)
+      return "Status: OFF\nFuture View off. Classic PREDICT-X only.";
+
+   string body="Status: "+g_pxmAct.headline;
+   if(g_pxmAct.stepMemory!="") body+="\n1) "+g_pxmAct.stepMemory;
+   if(g_pxmAct.stepLookup!="") body+="\n2) "+g_pxmAct.stepLookup;
+   if(g_pxmAct.stepRefuse!="") body+="\n3) "+g_pxmAct.stepRefuse;
+   if(g_pxmAct.stepSLTP!="")   body+="\n4) "+g_pxmAct.stepSLTP;
+   if(g_pxmAct.stepResize!="") body+="\n5) "+g_pxmAct.stepResize;
+   if(g_pxmAct.stepGO!="")     body+="\n6) "+g_pxmAct.stepGO;
+   if(g_pxmAct.reason!="")     body+="\nNote: "+g_pxmAct.reason;
+   return body;
 }
 
 //+------------------------------------------------------------------+
@@ -148,7 +248,7 @@ string PXM_FileName()
 //--- single source of truth for the CSV header (written on create and rewrite)
 string PXM_HeaderLine()
 {
-   return "PXMV1,PXM memory bank (show-only). kind,time,dir,score,tier,l1..l6,candle,er,atrRatio,adx,rsi,stDir,sqz,atrPts,spreadPts,entry,sl,tp1,tp2,result,win,tp1hit,maeATR,pnlR,barsRes";
+   return "PXMV1,PXM Aladin memory bank. kind,time,dir,score,tier,l1..l6,candle,er,atrRatio,adx,rsi,stDir,sqz,atrPts,spreadPts,entry,sl,tp1,tp2,result,win,tp1hit,maeATR,pnlR,barsRes";
 }
 
 //+------------------------------------------------------------------+
@@ -399,8 +499,16 @@ bool PXM_RewriteFile()
 void PXM_Init()
 {
    PXM_ResetView(g_pxmView);
+   PXM_ResetAction(g_pxmAct);
    g_pxmErr=0;
-   if(!InpPXM_Enable) { g_pxmFile=-1; return; }
+   if(!InpEnableAladin)
+   {
+      g_pxmFile=-1;
+      g_pxmAct.mode=PXM_MODE_OFF;
+      g_pxmAct.headline="Aladin off";
+      g_pxmAct.stepMemory="Master switch OFF";
+      return;
+   }
    string name=PXM_FileName();
    g_pxmFileDisplay=name;
    if(!FileIsExist(name))
@@ -415,11 +523,19 @@ void PXM_Init()
    g_pxmFile=FileOpen(name,FILE_READ|FILE_WRITE|FILE_TXT|FILE_SHARE_READ|FILE_SHARE_WRITE);
    if(g_pxmFile<0)
    {
-      Print("PREDICT-X MEM: cannot open memory file '",name,"' err=",GetLastError()," - memory disabled this session.");
+      g_pxmAct.mode=PXM_MODE_FAILED;
+      g_pxmAct.fellBack=true;
+      g_pxmAct.headline="Aladin failed";
+      g_pxmAct.reason="Memory file unavailable - classic EA path (no Aladin actions).";
+      g_pxmAct.stepMemory="FAILED: cannot open "+name;
+      Print("PREDICT-X ALADIN: cannot open memory file '",name,"' err=",GetLastError()," - falling back to classic EA.");
       return;
    }
    PXM_Load();
-   Print("PREDICT-X MEM: bank loaded: ",g_pxmCount," rows (",g_pxmResolved," resolved outcomes), file=",name);
+   g_pxmAct.mode=PXM_MODE_LEARNING;
+   g_pxmAct.headline="Aladin learning";
+   g_pxmAct.stepMemory=StringFormat("Bank loaded: %d setups (%d resolved)",g_pxmCount,g_pxmResolved);
+   Print("PREDICT-X ALADIN: bank loaded: ",g_pxmCount," rows (",g_pxmResolved," resolved outcomes), file=",name);
 }
 
 void PXM_Cleanup()
@@ -432,7 +548,7 @@ void PXM_Cleanup()
 //+------------------------------------------------------------------+
 void PXM_AppendRow(const PXM_Row &r)
 {
-   if(!InpPXM_Enable) return;
+   if(!InpEnableAladin) return;
    if(g_pxmFile<0) return;
    if(r.kind==2 || r.kind==1)
    {
@@ -514,7 +630,7 @@ void PXM_FeatFromRow(const PXM_Row &r,double &x[])
 void PXM_LookupKNN(const double &feat[],const int dir,const int k,PXM_View &v)
 {
    PXM_ResetView(v);
-   if(!InpPXM_Enable || k<=0 || dir==0 || g_pxmResolved<=0) return;
+   if(!InpEnableAladin || k<=0 || dir==0 || g_pxmResolved<=0) return;
    double xq[];
    PX3_NormalizeFeatures(feat,(PX_Direction)dir,xq);
    if(ArraySize(xq)!=12) return;
@@ -562,7 +678,7 @@ void PXM_LookupKNN(const double &feat[],const int dir,const int k,PXM_View &v)
    v.tp1Pct=sumTp1/cnt*100.0;
    v.maeATR=sumMae/cnt;
    v.avgBars=sumBars/cnt;
-   v.ready=(cnt>=InpPXM_MinSamples);
+   v.ready=(cnt>=PXM_MIN_SAMPLES);
 }
 
 //+------------------------------------------------------------------+
@@ -589,7 +705,7 @@ void PXM_ScanMAE(const int dir,const double entry,const double atr,const datetim
    else      maeATR=MathMax(0.0,(ext-entry)/atr);
 }
 
-// resolve an unfilled/untracked live signal from OHLC projection (show-only)
+// resolve an unfilled/untracked live signal from OHLC projection (memory only)
 void PXM_ProjectOutcome(PXM_LivePend &p,double &maeATR,int &barsRes,int &result,double &pnlR)
 {
    maeATR=0.0; barsRes=0; result=PXM_RESULT_NONE; pnlR=0.0;
@@ -599,7 +715,7 @@ void PXM_ProjectOutcome(PXM_LivePend &p,double &maeATR,int &barsRes,int &result,
    s0-=1; // signal bar was shift s0; execution starts the next bar
    double risk=MathAbs(p.entry-p.sl);
    if(risk<=0.0) return;
-   double spread=(InpPXM_SpreadPoints>0.0?InpPXM_SpreadPoints:(double)SymbolInfoInteger(_Symbol,SYMBOL_SPREAD))*_Point;
+   double spread=PXM_AutoSpreadPoints()*_Point;
    bool buy=(p.dir>0);
    double beLvl=(buy?p.entry+1.5*spread:p.entry-1.5*spread);
    int sEnd=MathMax(1,s0-PXM_SIM_BARS);
@@ -665,7 +781,7 @@ void PXM_LogLiveSignal(const PX_Lifecycle &lc,const PX_ScoreResult &sr,const PX_
    r.l1=sr.layer1; r.l2=sr.layer2; r.l3=sr.layer3; r.l4=sr.layer4; r.l5=sr.layer5; r.l6=sr.layer6; r.candle=sr.candleBonus;
    r.er=reg.er; r.atrRatio=reg.atrRatio; r.adx=tc.adx; r.rsi=tc.rsi; r.stDir=(double)tc.stDir; r.sqz=tc.ttmSqueeze;
    r.atrPts=(vc.atr>0.0?vc.atr/_Point:0.0);
-   r.spreadPts=(InpPXM_SpreadPoints>0.0?InpPXM_SpreadPoints:vc.avgSpreadPoints);
+   r.spreadPts=PXM_AutoSpreadPoints(vc.avgSpreadPoints);
    r.entry=0.0; r.sl=0.0; r.tp1=0.0; r.tp2=0.0;
    r.result=PXM_RESULT_NONE; r.win=0; r.tp1hit=0; r.maeATR=0.0; r.pnlR=0.0; r.barsRes=0;
    PXM_AppendRow(r);
@@ -741,15 +857,42 @@ void PXM_OnTradeClosed(const double profitMoney,const bool isTP)
 
 //+------------------------------------------------------------------+
 //| PX_FutureViewCheck - called from PX_OnNewClosedBar() between     |
-//| the lifecycle update and PX_CalcTradeSetup(). Show-only in A.    |
+//| lifecycle update and PX_CalcTradeSetup(). Memory + k-NN + steps. |
 //+------------------------------------------------------------------+
 void PX_FutureViewCheck(const PX_Lifecycle &lc,const bool newSignal,const PX_ScoreResult &sr,const PX_RegimeState &reg,const PX_ValueContext &vc,const PX_TrendContext &tc,const double &feat[])
 {
    PXM_ResetView(g_pxmView);
-   if(!InpPXM_Enable || g_pxmFile<0) return;
+   // Keep failed/off flags; rebuild step lines for this bar.
+   bool wasFailed=g_pxmAct.fellBack;
+   string failReason=g_pxmAct.reason;
+   PXM_ResetAction(g_pxmAct);
+   if(wasFailed)
+   {
+      g_pxmAct.fellBack=true;
+      g_pxmAct.mode=PXM_MODE_FAILED;
+      g_pxmAct.headline="Aladin failed";
+      g_pxmAct.reason=(failReason!=""?failReason:"Memory unavailable - classic EA path.");
+      g_pxmAct.stepMemory=g_pxmAct.reason;
+      return;
+   }
+   if(!InpEnableAladin)
+   {
+      g_pxmAct.mode=PXM_MODE_OFF;
+      g_pxmAct.headline="Aladin off";
+      g_pxmAct.stepMemory="Master switch OFF - Future View off";
+      return;
+   }
+   if(g_pxmFile<0)
+   {
+      g_pxmAct.fellBack=true;
+      g_pxmAct.mode=PXM_MODE_FAILED;
+      g_pxmAct.headline="Aladin failed";
+      g_pxmAct.reason="Memory file unavailable - classic EA path (no Aladin actions).";
+      g_pxmAct.stepMemory=g_pxmAct.reason;
+      return;
+   }
 
-   // 1) tracked live trade is over but no close deal was seen (e.g. restart):
-   //    settle it by projection so the bank does not keep a forever-open row.
+   // 1) settle unfinished live trackers
    if(g_pxmPendActive && g_pxmPend.filled==1 && g_pxmPend.entry>0.0 && lc.state!=PX_STATE_ACTIVE && lc.state!=PX_STATE_PENDING && !PX_TM_HasAnyManagedTrade())
    {
       if(TimeCurrent()>(datetime)((long)g_pxmPend.time+2*(long)PeriodSeconds(_Period)))
@@ -762,7 +905,7 @@ void PX_FutureViewCheck(const PX_Lifecycle &lc,const bool newSignal,const PX_Sco
             if(res==PXM_RESULT_TMO) win=0;
             PXM_AppendUpdate(g_pxmPend.time,g_pxmPend.dir,g_pxmPend.entry,g_pxmPend.sl,g_pxmPend.tp1,g_pxmPend.tp2,
                              res,win,g_pxmPend.tp1hit,mae,pnl,bres);
-            Print("PREDICT-X MEM: unfilled/live-expired signal settled by OHLC projection (show-only).");
+            Print("PREDICT-X ALADIN: unfilled/live-expired signal settled by OHLC projection.");
             g_pxmPendActive=false;
             PXM_SavePendGV();
          }
@@ -770,9 +913,6 @@ void PX_FutureViewCheck(const PX_Lifecycle &lc,const bool newSignal,const PX_Sco
    }
    else if(g_pxmPendActive && g_pxmPend.filled==0 && TimeCurrent()>(datetime)((long)g_pxmPend.time+(long)(2+PXM_SIM_BARS)*(long)PeriodSeconds(_Period)))
    {
-      // No trade was opened for this signal. Market setups (the ones that would
-      // have executed immediately) are settled by projection so the bank still
-      // grows while auto-trading is OFF; unfilled limits are simply dropped.
       if(g_pxmPend.atr>0.0 && (g_pxmPend.method==0 || g_pxmPend.method==1))
       {
          int s0=iBarShift(_Symbol,_Period,g_pxmPend.time,true);
@@ -780,9 +920,8 @@ void PX_FutureViewCheck(const PX_Lifecycle &lc,const bool newSignal,const PX_Sco
          {
             if(g_pxmPend.entry<=0.0)
             {
-               // never got a planned setup (e.g. signals before attach existed): approximate one
                double entry0=iOpen(_Symbol,_Period,s0-1);
-               double spread=(InpPXM_SpreadPoints>0.0?InpPXM_SpreadPoints:(double)SymbolInfoInteger(_Symbol,SYMBOL_SPREAD))*_Point;
+               double spread=PXM_AutoSpreadPoints()*_Point;
                if(g_pxmPend.dir>0)
                {
                   g_pxmPend.entry=entry0+spread;
@@ -809,7 +948,7 @@ void PX_FutureViewCheck(const PX_Lifecycle &lc,const bool newSignal,const PX_Sco
                   if(res==PXM_RESULT_TMO) win=0;
                   PXM_AppendUpdate(g_pxmPend.time,g_pxmPend.dir,g_pxmPend.entry,g_pxmPend.sl,g_pxmPend.tp1,g_pxmPend.tp2,
                                    res,win,g_pxmPend.tp1hit,mae,pnl,bres);
-                  Print("PREDICT-X MEM: signal-not-traded settled by projection (show-only).");
+                  Print("PREDICT-X ALADIN: signal-not-traded settled by projection.");
                   g_pxmPendActive=false;
                   PXM_SavePendGV();
                }
@@ -818,16 +957,113 @@ void PX_FutureViewCheck(const PX_Lifecycle &lc,const bool newSignal,const PX_Sco
       }
       else
       {
-         // limit that never filled or no data to settle: drop the tracker, keep the
-         // signal row unresolved (excluded from stats, still visible in the file).
          g_pxmPendActive=false;
          PXM_SavePendGV();
       }
    }
 
-   // 2) k-NN lookup for the CURRENT bar (drives the Future View block, show-only)
+   // Memory status step
+   if(g_pxmRhActive)
+   {
+      int pct=(g_pxmRhTotal>0?(int)MathRound(100.0*g_pxmRhDone/(double)g_pxmRhTotal):0);
+      g_pxmAct.stepMemory=StringFormat("Building history %d%% (%d setups, %d resolved)",pct,g_pxmCount,g_pxmResolved);
+      g_pxmAct.mode=PXM_MODE_LEARNING;
+      g_pxmAct.headline="Aladin learning";
+   }
+   else
+   {
+      g_pxmAct.stepMemory=StringFormat("Bank %d setups (%d resolved)",g_pxmCount,g_pxmResolved);
+   }
+
+   // 2) k-NN lookup for the CURRENT bar
    if(g_pxmResolved>0 && sr.dir!=PX_DIR_NONE && ArraySize(feat)==12)
-      PXM_LookupKNN(feat,(int)sr.dir,InpPXM_KNeighbors,g_pxmView);
+      PXM_LookupKNN(feat,(int)sr.dir,PXM_K_NEIGHBORS,g_pxmView);
+
+   if(g_pxmRhActive || g_pxmResolved<PXM_MIN_SAMPLES)
+   {
+      g_pxmAct.mode=PXM_MODE_LEARNING;
+      g_pxmAct.headline="Aladin learning";
+      g_pxmAct.stepLookup=StringFormat("Waiting for %d resolved outcomes before actions arm (have %d)",PXM_MIN_SAMPLES,g_pxmResolved);
+      g_pxmAct.stepRefuse="Idle - learning";
+      g_pxmAct.stepSLTP="Idle - learning";
+      g_pxmAct.stepResize="Idle - learning";
+      g_pxmAct.stepGO="Idle - learning";
+   }
+   else if(sr.dir==PX_DIR_NONE)
+   {
+      g_pxmAct.mode=PXM_MODE_READY;
+      g_pxmAct.headline="Aladin ready";
+      g_pxmAct.stepLookup="No direction this bar - no similar lookup";
+      g_pxmAct.stepRefuse="Idle";
+      g_pxmAct.stepSLTP="Idle";
+      g_pxmAct.stepResize="Idle";
+      g_pxmAct.stepGO="Idle";
+   }
+   else if(g_pxmView.n<=0)
+   {
+      // empty lookup: fall back quietly (do not freeze trading)
+      g_pxmAct.mode=PXM_MODE_READY;
+      g_pxmAct.headline="Aladin ready (no match)";
+      g_pxmAct.stepLookup="No similar setups - classic EA path this bar";
+      g_pxmAct.stepRefuse="Skipped - no similar history";
+      g_pxmAct.stepSLTP="Skipped - classic SL/TP";
+      g_pxmAct.stepResize="Skipped - full plan lot";
+      g_pxmAct.stepGO="Skipped - classic entry rules";
+      g_pxmAct.reason="Lookup empty - using classic PREDICT-X behaviour.";
+   }
+   else if(!g_pxmView.ready)
+   {
+      g_pxmAct.mode=PXM_MODE_LEARNING;
+      g_pxmAct.headline="Aladin learning";
+      g_pxmAct.stepLookup=StringFormat("Similar %d (need %d) - actions still off",g_pxmView.n,PXM_MIN_SAMPLES);
+      g_pxmAct.stepRefuse="Idle - not enough similar samples";
+      g_pxmAct.stepSLTP="Idle - not enough similar samples";
+      g_pxmAct.stepResize="Idle - not enough similar samples";
+      g_pxmAct.stepGO="Idle - not enough similar samples";
+   }
+   else
+   {
+      g_pxmAct.mode=PXM_MODE_ACTIVE;
+      g_pxmAct.headline="Aladin active - all powers armed";
+      g_pxmAct.stepLookup=StringFormat("Similar %d | Win %.0f%% | TP1 %.0f%% | dip %.1f ATR | ~%.1f bars",
+                                       g_pxmView.n,g_pxmView.winPct,g_pxmView.tp1Pct,g_pxmView.maeATR,g_pxmView.avgBars);
+
+      // Pre-decide refuse / resize / GO flags (applied after setup is built)
+      if(g_pxmView.winPct<PXM_REFUSE_WIN_PCT)
+      {
+         g_pxmAct.refused=true;
+         g_pxmAct.stepRefuse=StringFormat("REFUSE - win %.0f%% < %.0f%% on %d similar",g_pxmView.winPct,PXM_REFUSE_WIN_PCT,g_pxmView.n);
+         g_pxmAct.reason=g_pxmAct.stepRefuse;
+      }
+      else
+         g_pxmAct.stepRefuse=StringFormat("Allow - win %.0f%% >= %.0f%%",g_pxmView.winPct,PXM_REFUSE_WIN_PCT);
+
+      if(!g_pxmAct.refused && g_pxmView.winPct<PXM_LUKEWARM_WIN_PCT)
+      {
+         g_pxmAct.resizedLot=true;
+         g_pxmAct.lotFactor=PXM_HALF_LOT_FACTOR;
+         g_pxmAct.stepResize=StringFormat("RESIZE lot x%.2f - lukewarm win %.0f%%",PXM_HALF_LOT_FACTOR,g_pxmView.winPct);
+      }
+      else if(!g_pxmAct.refused)
+         g_pxmAct.stepResize="Lot plan unchanged (history not lukewarm)";
+      else
+         g_pxmAct.stepResize="Skipped - refused";
+
+      if(!g_pxmAct.refused && g_pxmView.winPct>=PXM_GO_WIN_PCT && g_pxmView.tp1Pct>=PXM_GO_TP1_PCT)
+      {
+         g_pxmAct.goMarket=true;
+         g_pxmAct.goExpiry=true;
+         g_pxmAct.expiryBonus=PXM_GO_EXPIRY_BONUS;
+         g_pxmAct.stepGO=StringFormat("GO - stronger entry + +%d expiry bars (win %.0f%% / TP1 %.0f%%)",
+                                      PXM_GO_EXPIRY_BONUS,g_pxmView.winPct,g_pxmView.tp1Pct);
+      }
+      else if(!g_pxmAct.refused)
+         g_pxmAct.stepGO="Standard entry rules (history not strong enough for GO)";
+      else
+         g_pxmAct.stepGO="Skipped - refused";
+
+      g_pxmAct.stepSLTP="Pending setup - will tune SL/TP from measured dip if needed";
+   }
 
    // 3) log a fresh live signal into the bank
    if(newSignal && lc.state==PX_STATE_PENDING && sr.tier>=PX_TIER_MEDIUM && vc.sessionActive && ArraySize(feat)==12)
@@ -835,9 +1071,203 @@ void PX_FutureViewCheck(const PX_Lifecycle &lc,const bool newSignal,const PX_Sco
 }
 
 //+------------------------------------------------------------------+
-//| Display: three movable block-functions (labels use PXM_ names,   |
-//| never touched by PX_DeletePanelObjects). Reposition by changing  |
-//| the x/y passed into PXM_DrawFutureViewStack() in PREDICT-X.mq5.  |
+//| Phase B: apply Aladin actions onto the live trade setup.         |
+//| Called AFTER PX_CalcTradeSetup / pending refresh.                |
+//| Never invents a trade. Never raises lot above the risk plan.     |
+//| On any problem -> leave setup as classic and mark fallback note. |
+//+------------------------------------------------------------------+
+void PXM_ApplyTradeActions(PX_TradeSetup &ts,const PX_ScoreResult &sr,const double atr,const double riskPct,const double baseLotFactor,const bool useInitialSL,const double ask,const double bid)
+{
+   // Default step text if Apply is called without a ready active view
+   if(!InpEnableAladin || g_pxmAct.fellBack || g_pxmAct.mode==PXM_MODE_OFF)
+      return;
+   if(g_pxmAct.mode==PXM_MODE_LEARNING || g_pxmAct.mode==PXM_MODE_FAILED)
+      return;
+   if(!g_pxmView.ready || g_pxmView.n<PXM_MIN_SAMPLES)
+   {
+      // already documented in FutureViewCheck
+      return;
+   }
+   if(sr.dir==PX_DIR_NONE || sr.tier<PX_TIER_MEDIUM)
+   {
+      g_pxmAct.stepSLTP="No tradeable setup this bar";
+      return;
+   }
+
+   // REFUSE: invalidate setup so TradeManager places nothing new
+   if(g_pxmAct.refused)
+   {
+      ts.valid=false;
+      ts.method=PX_ENTRY_NONE;
+      ts.methodText="aladin refused (weak history)";
+      ts.lot=0.0;
+      g_pxmAct.stepSLTP="Skipped - refused";
+      g_pxmAct.stepResize="Skipped - refused";
+      g_pxmAct.stepGO="Skipped - refused";
+      Print("PREDICT-X ALADIN: REFUSE - ",g_pxmAct.reason);
+      return;
+   }
+
+   if(!ts.valid || atr<=0.0 || ts.entry<=0.0)
+   {
+      g_pxmAct.stepSLTP="No valid setup to tune - classic path";
+      return;
+   }
+
+   bool buy=(ts.dir==PX_DIR_BUY);
+   double oldSL=ts.sl, oldTP1=ts.tp1, oldTP2=ts.tp2, oldLot=ts.lot;
+   double oldRisk=MathAbs(ts.entry-ts.sl);
+   if(oldRisk<=0.0) oldRisk=atr;
+
+   // 1) smarter SL/TP from measured dip + typical run
+   double needSL_ATR=MathMax(PXM_SL_MIN_ATR, MathMin(PXM_SL_MAX_ATR, g_pxmView.maeATR + PXM_SL_DIP_PAD_ATR));
+   double curSL_ATR=MathAbs(ts.entry-ts.sl)/atr;
+   bool widened=false;
+   if(g_pxmView.maeATR>0.0 && needSL_ATR>curSL_ATR+0.05)
+   {
+      if(buy) ts.sl=ts.entry - needSL_ATR*atr;
+      else    ts.sl=ts.entry + needSL_ATR*atr;
+      widened=true;
+      g_pxmAct.widenedSL=true;
+   }
+
+   // Rebuild TP distances from (possibly new) risk, guided by history TP1 rate
+   double risk=MathAbs(ts.entry-ts.sl);
+   if(risk<=0.0) risk=oldRisk;
+   double tp1R=1.00;
+   if(g_pxmView.tp1Pct>=80.0) tp1R=0.90;
+   else if(g_pxmView.tp1Pct>=65.0) tp1R=1.00;
+   else tp1R=1.10;
+   double tp2R=1.60;
+   if(sr.tier==PX_TIER_VERY_STRONG) tp2R=2.20;
+   else if(sr.tier==PX_TIER_STRONG) tp2R=1.85;
+   // If history is strong, allow a slightly more ambitious TP2
+   if(g_pxmView.winPct>=PXM_GO_WIN_PCT) tp2R=MathMax(tp2R,1.90);
+   double tp1Dist=MathMax(0.80*risk, tp1R*risk);
+   double tp2Dist=MathMax(tp1Dist+0.30*risk, tp2R*risk);
+   if(buy){ ts.tp1=ts.entry+tp1Dist; ts.tp2=ts.entry+tp2Dist; }
+   else   { ts.tp1=ts.entry-tp1Dist; ts.tp2=ts.entry-tp2Dist; }
+   g_pxmAct.smartSLTP=true;
+   if(widened)
+      g_pxmAct.stepSLTP=StringFormat("SL widened to %.2f ATR (dip %.2f) | TP1 %.2fR TP2 %.2fR",
+                                     needSL_ATR,g_pxmView.maeATR,tp1R,tp2R);
+   else
+      g_pxmAct.stepSLTP=StringFormat("SL OK (%.2f ATR covers dip %.2f) | TP1 %.2fR TP2 %.2fR",
+                                     curSL_ATR,g_pxmView.maeATR,tp1R,tp2R);
+
+   // 2) GO-A: stronger entry - convert limit to market when history is strong
+   if(g_pxmAct.goMarket && ts.method!=PX_ENTRY_MARKET && ask>0.0 && bid>0.0 && ask>bid)
+   {
+      ts.method=PX_ENTRY_MARKET;
+      ts.entry=(buy?ask:bid);
+      double slATRUse=(widened?needSL_ATR:MathMax(curSL_ATR,needSL_ATR));
+      if(buy)
+      {
+         ts.sl=ts.entry-slATRUse*atr;
+         ts.breakeven=ts.entry+1.5*(ask-bid);
+      }
+      else
+      {
+         ts.sl=ts.entry+slATRUse*atr;
+         ts.breakeven=ts.entry-1.5*(ask-bid);
+      }
+      risk=MathAbs(ts.entry-ts.sl);
+      if(risk<=0.0) risk=slATRUse*atr;
+      tp1Dist=MathMax(0.80*risk, tp1R*risk);
+      tp2Dist=MathMax(tp1Dist+0.30*risk, tp2R*risk);
+      if(buy){ ts.tp1=ts.entry+tp1Dist; ts.tp2=ts.entry+tp2Dist; }
+      else   { ts.tp1=ts.entry-tp1Dist; ts.tp2=ts.entry-tp2Dist; }
+      ts.methodText="market (Aladin GO - strong history)";
+      Print("PREDICT-X ALADIN: GO-A limit->market (win ",DoubleToString(g_pxmView.winPct,0),"% TP1 ",DoubleToString(g_pxmView.tp1Pct,0),"%)");
+   }
+
+   // 3) RESIZE lot (never above base plan)
+   double lf=baseLotFactor * MathMin(1.0, g_pxmAct.lotFactor);
+   if(lf<=0.0) lf=baseLotFactor;
+   // Snapshot classic geometry so a failed Aladin tweak can fall back safely.
+   PX_TradeSetup classic=ts;
+   classic.sl=oldSL; classic.tp1=oldTP1; classic.tp2=oldTP2; classic.lot=oldLot;
+   // After SL change, lot is recomputed from risk money target
+   if(!PX_ApplyBrokerStopDistance(ts,ask,bid,useInitialSL,riskPct,lf))
+   {
+      // Broker rejected Aladin geometry -> restore classic setup (do not freeze trading).
+      ts=classic;
+      ts.valid=true;
+      // Re-apply classic broker distance with full base lot factor.
+      if(!PX_ApplyBrokerStopDistance(ts,ask,bid,useInitialSL,riskPct,baseLotFactor))
+      {
+         // Classic also failed (rare) - leave invalid.
+         g_pxmAct.stepSLTP="Aladin + classic broker distance failed - no setup this bar";
+         g_pxmAct.reason="Broker distance failed after Aladin tweak and classic restore.";
+         Print("PREDICT-X ALADIN: broker distance failed (Aladin + classic).");
+         return;
+      }
+      g_pxmAct.smartSLTP=false;
+      g_pxmAct.widenedSL=false;
+      g_pxmAct.goMarket=false;
+      g_pxmAct.resizedLot=false;
+      g_pxmAct.lotFactor=1.0;
+      g_pxmAct.stepSLTP="Aladin SL/TP failed broker rules - restored classic SL/TP";
+      g_pxmAct.stepResize="Classic lot restored";
+      g_pxmAct.stepGO="Classic entry restored";
+      g_pxmAct.reason="Aladin tweak failed broker distance - classic path this bar.";
+      Print("PREDICT-X ALADIN: fell back to classic setup after broker distance fail.");
+      return;
+   }
+   // Explicit lot recompute with capped factor (safety: never raise above base)
+   double baseLot=PX_CalcLot(riskPct,baseLotFactor,ts.entry,ts.sl);
+   double actLot=PX_CalcLot(riskPct,lf,ts.entry,ts.sl);
+   if(actLot>baseLot) actLot=baseLot;
+   ts.lot=actLot;
+   double tickValue=SymbolInfoDouble(_Symbol,SYMBOL_TRADE_TICK_VALUE), tickSize=SymbolInfoDouble(_Symbol,SYMBOL_TRADE_TICK_SIZE);
+   ts.riskMoney=(tickSize>0.0?MathAbs(ts.entry-ts.sl)/tickSize*tickValue*ts.lot:0.0);
+   ts.rewardMoney=(tickSize>0.0?MathAbs(ts.tp2-ts.entry)/tickSize*tickValue*ts.lot:0.0);
+   ts.rr=(MathAbs(ts.entry-ts.sl)>0?MathAbs(ts.tp2-ts.entry)/MathAbs(ts.entry-ts.sl):0.0);
+
+   if(g_pxmAct.resizedLot)
+      g_pxmAct.stepResize=StringFormat("RESIZE lot %.2f -> %.2f (x%.2f, lukewarm win %.0f%%)",
+                                       oldLot,ts.lot,g_pxmAct.lotFactor,g_pxmView.winPct);
+   else
+      g_pxmAct.stepResize=StringFormat("Lot %.2f (full plan)",ts.lot);
+
+   if(g_pxmAct.goMarket || g_pxmAct.goExpiry)
+   {
+      string goBits="";
+      if(g_pxmAct.goMarket) goBits+="market entry";
+      if(g_pxmAct.goExpiry) goBits+=(goBits==""?"":" + ")+StringFormat("+%d expiry bars",g_pxmAct.expiryBonus);
+      g_pxmAct.stepGO="GO active: "+goBits;
+   }
+
+   // Final headline when any power actually changed something
+   if(g_pxmAct.refused || g_pxmAct.smartSLTP || g_pxmAct.resizedLot || g_pxmAct.goMarket || g_pxmAct.goExpiry)
+   {
+      g_pxmAct.mode=PXM_MODE_ACTIVE;
+      g_pxmAct.headline="Aladin active - actions applied";
+      Print("PREDICT-X ALADIN: applied - SL ",DoubleToString(oldSL,_Digits),"->",DoubleToString(ts.sl,_Digits),
+            " TP1 ",DoubleToString(oldTP1,_Digits),"->",DoubleToString(ts.tp1,_Digits),
+            " lot ",DoubleToString(oldLot,2),"->",DoubleToString(ts.lot,2),
+            " goMkt=",g_pxmAct.goMarket," refuse=",g_pxmAct.refused);
+   }
+}
+
+// Effective pending expiry = base + Aladin GO-B bonus (0 when not active).
+int PXM_EffectiveExpiry(const int baseExpiry)
+{
+   int exp=MathMax(1,baseExpiry);
+   if(PXM_CanAct() && g_pxmAct.goExpiry && g_pxmAct.expiryBonus>0 && !g_pxmAct.refused)
+      exp+=g_pxmAct.expiryBonus;
+   return exp;
+}
+
+// Stronger market-entry OR: classic flags OR Aladin GO-A.
+bool PXM_BoostMarketAllowed(const bool classicAllowed)
+{
+   if(classicAllowed) return true;
+   return (PXM_CanAct() && g_pxmAct.goMarket && !g_pxmAct.refused);
+}
+
+//+------------------------------------------------------------------+
+//| Display helpers (legacy PXM_ labels kept for cleanup)            |
 //+------------------------------------------------------------------+
 void PXM_DelBlock(const string prefix)
 {
@@ -848,143 +1278,12 @@ void PXM_DelBlock(const string prefix)
    }
 }
 
-void PXM_Label(string name,const int x,const int y,const string text,const color clr,const int fs,string tooltip)
-{
-   name="PXM_"+name;
-   if(ObjectFind(0,name)<0) ObjectCreate(0,name,OBJ_LABEL,0,0,0);
-   ObjectSetInteger(0,name,OBJPROP_CORNER,CORNER_LEFT_UPPER);
-   ObjectSetInteger(0,name,OBJPROP_XDISTANCE,x);
-   ObjectSetInteger(0,name,OBJPROP_YDISTANCE,y);
-   ObjectSetInteger(0,name,OBJPROP_COLOR,clr);
-   ObjectSetInteger(0,name,OBJPROP_FONTSIZE,fs);
-   ObjectSetString(0,name,OBJPROP_FONT,"Consolas");
-   ObjectSetString(0,name,OBJPROP_TEXT,text);
-   ObjectSetString(0,name,OBJPROP_TOOLTIP,PX_WrapTooltip(tooltip));
-   ObjectSetInteger(0,name,OBJPROP_SELECTABLE,false);
-}
-
-void PXM_Rect(string name,const int x,const int y,const int w,const int h,const color bg)
-{
-   name="PXM_"+name;
-   if(ObjectFind(0,name)<0) ObjectCreate(0,name,OBJ_RECTANGLE_LABEL,0,0,0);
-   ObjectSetInteger(0,name,OBJPROP_CORNER,CORNER_LEFT_UPPER);
-   ObjectSetInteger(0,name,OBJPROP_XDISTANCE,x);
-   ObjectSetInteger(0,name,OBJPROP_YDISTANCE,y);
-   ObjectSetInteger(0,name,OBJPROP_XSIZE,w);
-   ObjectSetInteger(0,name,OBJPROP_YSIZE,h);
-   ObjectSetInteger(0,name,OBJPROP_BGCOLOR,bg);
-   ObjectSetInteger(0,name,OBJPROP_BORDER_COLOR,clrDimGray);
-   ObjectSetInteger(0,name,OBJPROP_SELECTABLE,false);
-   ObjectSetInteger(0,name,OBJPROP_BACK,false);
-}
-
-//--- block 1: FUTURE VIEW (left panel, the memory verdict for this bar)
-void PXM_DrawFutureViewBlock(const int x,const int y,const double atrPrice,const double entryPrice,const double slPrice)
-{
-   PXM_DelBlock("FV_");
-   if(!InpPXM_Enable || !InpPXM_ShowFutureView) return;
-   PXM_Rect("FV_BG",x,y,455,64,(color)0x101010);
-   int yy=y+6;
-   PXM_Label("FV_H",x+11,yy,"FUTURE VIEW",clrAqua,10,"Aladdin memory: how similar past setups on this symbol+TF ended. Show-only in Phase A - it never changes a trade.");
-   yy+=17;
-   int minNeed=InpPXM_MinSamples;
-   if(g_pxmResolved<minNeed)
-   {
-      int show=MathMin(g_pxmResolved,minNeed);
-      PXM_Label("FV_1",x+11,yy,StringFormat("Memory gathering %d/%d",show,minNeed),clrGray,10,"Rehearsal + live logging is building the bank.");
-      yy+=16;
-      PXM_Label("FV_2",x+11,yy,"Similar setups appear here once the bank is large enough",clrGray,9,"Show-only display.");
-      return;
-   }
-   if(g_pxmView.n<=0)
-   {
-      PXM_Label("FV_1",x+11,yy,"Similar 0 | - | -",clrGray,10,"No similar past setups for the current direction/features yet.");
-      yy+=16;
-      PXM_Label("FV_2",x+11,yy,"Bank: "+IntegerToString(g_pxmResolved)+" resolved outcomes",clrGray,9,"");
-      return;
-   }
-   color clrWin=(g_pxmView.winPct>=55.0?clrLime:(g_pxmView.winPct>=45.0?clrGold:clrTomato));
-   PXM_Label("FV_1",x+11,yy,StringFormat("Similar %d | Win %.0f%% | TP1 %.0f%% | dip %.1f ATR | ~%.1f bars",
-            g_pxmView.n,g_pxmView.winPct,g_pxmView.tp1Pct,g_pxmView.maeATR,g_pxmView.avgBars),clrWin,10,
-            "k-NN over similar resolved setups. Win = finished positive (TP1+), TP1 = reached TP1 first, dip = typical MAE in ATR.");
-   yy+=16;
-   if(atrPrice>0.0 && entryPrice>0.0 && slPrice>0.0 && MathAbs(entryPrice-slPrice)>0.0)
-   {
-      double slATR=MathAbs(entryPrice-slPrice)/atrPrice;
-      if(g_pxmView.maeATR>slATR)
-         PXM_Label("FV_2",x+11,yy,StringFormat("Typical dip %.1f ATR > planned SL %.1f ATR - similar trades got wider dips",
-                  g_pxmView.maeATR,slATR),clrOrange,9,"Phase A: note only. (RESIZE power comes in Phase B and defaults OFF.)");
-      else
-         PXM_Label("FV_2",x+11,yy,StringFormat("Planned SL %.1f ATR covers typical dip %.1f ATR - OK",
-                  slATR,g_pxmView.maeATR),clrSilver,9,"Typical adverse excursion of similar setups fits inside the planned stop.");
-   }
-   else
-      PXM_Label("FV_2",x+11,yy,"No active setup this bar - dip vs SL shown when a setup is planned",clrGray,9,"");
-}
-
-//--- block 2: scorecard line (last 30 resolved outcomes per tier + AI flag)
-void PXM_DrawScorecardLine(const int x,const int y)
-{
-   PXM_DelBlock("SC_");
-   if(!InpPXM_Enable || !InpPXM_ShowFutureView || g_pxmResolved<=0) return;
-   int nMed=0,nStr=0,nV=0; double wMed=0.0,wStr=0.0,wV=0.0;
-   for(int i=g_pxmCount-1;i>=0;i--)
-   {
-      PXM_Row r=g_pxmRows[i];
-      if(r.kind==3) continue;
-      if(r.result<PXM_RESULT_SL || r.result>PXM_RESULT_BE) continue;
-      if(r.tier==PX_TIER_MEDIUM && nMed<30) { nMed++; wMed+=(r.win>0?1.0:0.0); }
-      else if(r.tier==PX_TIER_STRONG && nStr<30) { nStr++; wStr+=(r.win>0?1.0:0.0); }
-      else if(r.tier==PX_TIER_VERY_STRONG && nV<30) { nV++; wV+=(r.win>0?1.0:0.0); }
-      if(nMed>=30 && nStr>=30 && nV>=30) break;
-   }
-   string txt="Last 30: ";
-   txt+=(nMed>0 ? StringFormat("MED %.0f%% (%d) | ",wMed/nMed*100.0,nMed) : "MED - | ");
-   txt+=(nStr>0 ? StringFormat("STR %.0f%% (%d) | ",wStr/nStr*100.0,nStr) : "STR - | ");
-   txt+=(nV>0   ? StringFormat("VSTR %.0f%% (%d) | ",wV/nV*100.0,nV) : "VSTR - | ");
-   txt+=(InpEnableAIEnhancement?"AI on":"AI off");
-   PXM_Label("SC_1",x,y,txt,clrSilver,9,"Measured win-rate per tier over the last 30 resolved outcomes in the memory bank (rehearsal + live). Display only - no auto weight tuning.");
-}
-
-//--- block 3: memory status line
-void PXM_DrawMemoryStatus(const int x,const int y)
-{
-   PXM_DelBlock("MS_");
-   if(!InpPXM_Enable) return;
-   string txt;
-   color clr=clrSilver;
-   if(g_pxmRhActive)
-   {
-      int pct=(g_pxmRhTotal>0?(int)MathRound(100.0*g_pxmRhDone/(double)g_pxmRhTotal):0);
-      txt=StringFormat("Memory: building %d%% (%d setups)",pct,g_pxmCount);
-      clr=clrGray;
-   }
-   else if(g_pxmFile<0)
-   {
-      txt="Memory: file unavailable - show-only stats off";
-      clr=clrOrange;
-   }
-   else
-   {
-      txt=StringFormat("Memory: %d setups (%d resolved)",g_pxmCount,g_pxmResolved);
-      if(g_pxmErr>0) txt+=" [io errors "+IntegerToString(g_pxmErr)+"]";
-   }
-   PXM_Label("MS_1",x,y,txt,clr,9,"Memory file: MQL5\\Files\\"+g_pxmFileDisplay+". Rehearsal builds history; live signals append on every new signal.");
-}
-
-void PXM_DrawFutureViewStack(const int x,const int y,const double atrPrice,const double entryPrice,const double slPrice)
-{
-   if(!InpPXM_Enable || !InpPXM_ShowFutureView) return;
-   PXM_DrawFutureViewBlock(x,y,atrPrice,entryPrice,slPrice);          // block 1 (under SIGNAL)
-   PXM_DrawScorecardLine(x,y+68);                                     // block 2 (scorecard)
-   PXM_DrawMemoryStatus(x,y+84);                                      // block 3 (memory status)
-}
-
 void PXM_DeleteObjects()
 {
    PXM_DelBlock("FV_");
    PXM_DelBlock("SC_");
    PXM_DelBlock("MS_");
+   PXM_DelBlock("AL_");
    for(int i=ObjectsTotal(0)-1;i>=0;i--)
    {
       string name=ObjectName(0,i);

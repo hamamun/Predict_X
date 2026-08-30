@@ -1276,11 +1276,14 @@ void PX_TM_RenderOrderPanel(PX_TradeManagerState &tm,bool showPanel,const PX_Tra
    bool hasSetup=(ts.valid && sr.tier>=PX_TIER_MEDIUM && sr.dir!=PX_DIR_NONE && lc.state==PX_STATE_PENDING);
    if(!showPanel || (!hasManaged && !hasSetup)) return;
 
-   int x=PX_RIGHT_PNL_X,y=PX_RIGHT_PNL_Y,w=PX_RIGHT_PNL_W,h=PX_RIGHT_PNL_H;
+   // Stay glued to the dynamic left panel (width/height can grow with Aladin text).
+   int x=PX_RightPanelX(),y=PX_RIGHT_PNL_Y,w=PX_RIGHT_PNL_W,h=g_pxMainPanelH;
    if(ObjectFind(0,PX_MAIN_PANEL_BG_NAME)>=0)
    {
       long leftPanelH=ObjectGetInteger(0,PX_MAIN_PANEL_BG_NAME,OBJPROP_YSIZE);
+      long leftPanelW=ObjectGetInteger(0,PX_MAIN_PANEL_BG_NAME,OBJPROP_XSIZE);
       if(leftPanelH>0) h=(int)leftPanelH;
+      if(leftPanelW>0) x=PX_PNL_X+(int)leftPanelW+PX_PNL_GAP;
    }
    PX2_Rect("ORDER_BG",x,y,w,h,(color)0x101010,clrDimGray);
    y+=12;
