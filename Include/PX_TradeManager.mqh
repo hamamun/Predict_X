@@ -38,6 +38,18 @@ struct PX_TradeManagerState
    string stateText;
    string lastAction;
    datetime lastActionTime;
+
+   // --- Staircase protection state (additive; defaults are safe no-ops) ---
+   // protectArmed=true once floating P/L has reached triggerPctOfRisk of the
+   // position's live risk. Until then, the trade is left untouched with only
+   // the broker-side initial SL as its downside (per the user's intent).
+   bool   protectArmed;
+   double triggerMoney;     // cached 1% of risk at arming time, in account money
+   int    currentBucket;    // 0=pre-bucket1, 1=lock1->lock2, 2=lock2->lock3, 3=lock3->TP1, 4=post-TP1
+   double bucketPeak;       // best favorable price since entering currentBucket
+   double bucketEntry;      // price at which the current bucket was entered
+   double currentLock;      // lock price of the current bucket (0 if none)
+   double staircaseRisk;    // live risk in $ at arming time, for re-arming checks
 };
 
 string PX2_PREFIX="PX2_";
@@ -62,6 +74,14 @@ void PX_TM_SavePersistence(PX_TradeManagerState &tm)
    GlobalVariableSet(PX_TM_Key("postTP1Best"),tm.postTP1Best);
    GlobalVariableSet(PX_TM_Key("preTP1Best"),tm.preTP1Best);
    GlobalVariableSet(PX_TM_Key("savedAt"),(double)TimeCurrent());
+   // Staircase protection state (additive; does not change existing behavior).
+   GlobalVariableSet(PX_TM_Key("protectArmed"),(tm.protectArmed?1.0:0.0));
+   GlobalVariableSet(PX_TM_Key("triggerMoney"),tm.triggerMoney);
+   GlobalVariableSet(PX_TM_Key("currentBucket"),(double)tm.currentBucket);
+   GlobalVariableSet(PX_TM_Key("bucketPeak"),tm.bucketPeak);
+   GlobalVariableSet(PX_TM_Key("bucketEntry"),tm.bucketEntry);
+   GlobalVariableSet(PX_TM_Key("currentLock"),tm.currentLock);
+   GlobalVariableSet(PX_TM_Key("staircaseRisk"),tm.staircaseRisk);
 }
 
 void PX_TM_LoadPersistence(PX_TradeManagerState &tm)
@@ -78,12 +98,20 @@ void PX_TM_LoadPersistence(PX_TradeManagerState &tm)
    if(GlobalVariableCheck(PX_TM_Key("postTP1MidLocked"))) tm.postTP1MidLocked=(GlobalVariableGet(PX_TM_Key("postTP1MidLocked"))>0.5);
    if(GlobalVariableCheck(PX_TM_Key("postTP1Best"))) tm.postTP1Best=GlobalVariableGet(PX_TM_Key("postTP1Best"));
    if(GlobalVariableCheck(PX_TM_Key("preTP1Best"))) tm.preTP1Best=GlobalVariableGet(PX_TM_Key("preTP1Best"));
+   // Staircase protection state (additive). Defaults to "not armed" on first run.
+   if(GlobalVariableCheck(PX_TM_Key("protectArmed"))) tm.protectArmed=(GlobalVariableGet(PX_TM_Key("protectArmed"))>0.5);
+   if(GlobalVariableCheck(PX_TM_Key("triggerMoney")))  tm.triggerMoney=GlobalVariableGet(PX_TM_Key("triggerMoney"));
+   if(GlobalVariableCheck(PX_TM_Key("currentBucket"))) tm.currentBucket=(int)GlobalVariableGet(PX_TM_Key("currentBucket"));
+   if(GlobalVariableCheck(PX_TM_Key("bucketPeak")))    tm.bucketPeak=GlobalVariableGet(PX_TM_Key("bucketPeak"));
+   if(GlobalVariableCheck(PX_TM_Key("bucketEntry")))  tm.bucketEntry=GlobalVariableGet(PX_TM_Key("bucketEntry"));
+   if(GlobalVariableCheck(PX_TM_Key("currentLock")))   tm.currentLock=GlobalVariableGet(PX_TM_Key("currentLock"));
+   if(GlobalVariableCheck(PX_TM_Key("staircaseRisk"))) tm.staircaseRisk=GlobalVariableGet(PX_TM_Key("staircaseRisk"));
 }
 
 void PX_TM_ClearPersistence()
 {
-   string keys[13]={"entry","originalSL","tp1","tp2","breakeven","lastTrail","tp1Hit","earlyStage","entryTimeframe","postTP1MidLocked","postTP1Best","preTP1Best","savedAt"};
-   for(int i=0;i<13;i++) GlobalVariableDel(PX_TM_Key(keys[i]));
+   string keys[20]={"entry","originalSL","tp1","tp2","breakeven","lastTrail","tp1Hit","earlyStage","entryTimeframe","postTP1MidLocked","postTP1Best","preTP1Best","savedAt","protectArmed","triggerMoney","currentBucket","bucketPeak","bucketEntry","currentLock","staircaseRisk"};
+   for(int i=0;i<20;i++) GlobalVariableDel(PX_TM_Key(keys[i]));
 }
 
 double PX_NormPrice(const double price)
@@ -211,6 +239,15 @@ void PX_TM_Init(PX_TradeManagerState &tm,bool enabled,double dailyLossPct)
    tm.stateText="IDLE";
    tm.lastAction="Initialized";
    tm.lastActionTime=TimeCurrent();
+   // Staircase protection state (additive). Defaults are safe no-ops; LoadPersistence
+   // will overwrite them from saved values if a previous run armed them.
+   tm.protectArmed=false;
+   tm.triggerMoney=0.0;
+   tm.currentBucket=0;
+   tm.bucketPeak=0.0;
+   tm.bucketEntry=0.0;
+   tm.currentLock=0.0;
+   tm.staircaseRisk=0.0;
    px_trade.SetExpertMagicNumber(PX_MAGIC);
    px_trade.SetDeviationInPoints(20);
    px_trade.SetTypeFillingBySymbol(_Symbol);
@@ -452,6 +489,10 @@ bool PX_TM_PlaceFromSetup(PX_TradeManagerState &tm,const PX_TradeSetup &ts,const
    {
       tm.entry=entry; tm.originalSL=plannedSL; tm.tp1=PX_NormPrice(ts.tp1); tm.tp2=tp; tm.breakeven=PX_NormPrice(ts.breakeven);
       tm.tp1Hit=false; tm.earlyStage=0; tm.entryTimeframe=(int)_Period; tm.postTP1MidLocked=false; tm.postTP1Best=0.0; tm.preTP1Best=entry; tm.lastTrail=0.0;
+      // Staircase protection: a fresh order means the staircase state must reset
+      // (additive; no effect unless protection is enabled and staircase logic runs).
+      tm.protectArmed=false; tm.triggerMoney=0.0; tm.currentBucket=0;
+      tm.bucketPeak=0.0; tm.bucketEntry=0.0; tm.currentLock=0.0; tm.staircaseRisk=0.0;
       PX_TM_SelectPending(tm.pendingTicket);
       PX_TM_SelectPosition(tm.positionTicket);
       tm.stateText=(tm.positionTicket>0?"ACTIVE":"PENDING ORDER");
@@ -707,6 +748,228 @@ void PX_TM_ApplyPostTP1GivebackTrail(PX_TradeManagerState &tm)
    else PX_TM_SavePersistence(tm);
 }
 
+//+------------------------------------------------------------------+
+//| STAIRCASE PROTECTION (additive layer)                             |
+//|                                                                  |
+//| Runs ONLY when:                                                   |
+//|   * a managed position exists,                                    |
+//|   * enableTradeProtection is true (caller's responsibility),     |
+//|   * tm.protectArmed is true (armed by reaching 1% of live risk).  |
+//|                                                                  |
+//| Until protectArmed is true, this function is a no-op. The trade   |
+//| is left untouched with the broker-side initial SL as its downside |
+//| (per the user's intent: never close at a loss before protection   |
+//| has armed).                                                       |
+//|                                                                  |
+//| Once armed, every tick it:                                        |
+//|   1. Determines the current bucket (0..4) by checking which      |
+//|      1/3, 2/3, 90% of entry->TP1 has been reached, OR post-TP1.  |
+//|   2. If a new bucket is entered, locks SL to that level (uses     |
+//|      existing PX_TM_MoveSL which enforces the never-move-        |
+//|      backward rule) and resets bucketPeak to current price.       |
+//|   3. Updates bucketPeak.                                          |
+//|   4. Closes the trade if price touches the current bucket lock    |
+//|      OR if price gives back `givebackPct` from the bucket peak.   |
+//|                                                                  |
+//| Hard safety: only PX_TM_ClosePosition is used to actually close,  |
+//| and we pre-check that the position's floating P/L is positive so  |
+//| this layer can never close a losing trade.                        |
+//+------------------------------------------------------------------+
+void PX_TM_ApplyStaircaseProtection(PX_TradeManagerState &tm,double triggerPctOfRisk,double givebackPct)
+{
+   // Hard guards: any one of these makes the function a complete no-op.
+   if(triggerPctOfRisk<=0.0 || givebackPct<=0.0) return;
+   if(!tm.protectArmed) return;
+
+   ulong ticket;
+   if(!PX_TM_SelectPosition(ticket)) return;
+   long type=PositionGetInteger(POSITION_TYPE);
+   bool buy=(type==POSITION_TYPE_BUY);
+   double curSL=PositionGetDouble(POSITION_SL);
+   double openPrice=PositionGetDouble(POSITION_PRICE_OPEN);
+
+   MqlTick tick;
+   string tickReason="";
+   if(!PX_TM_GetTick(tick,tickReason)) return;
+   double price=(buy?tick.bid:tick.ask);
+   if(price<=0.0) return;
+
+   // Bucket distance is the same 1/3, 2/3, 90% split used by the existing
+   // early-lock logic. tm.tp1 is always set when protectArmed is true (an
+   // order was placed and either protection was already armed or the
+   // staircase has just been armed by the trigger below).
+   if(tm.entry<=0.0 || tm.tp1<=0.0) return;
+   double dist=MathAbs(tm.tp1-tm.entry);
+   if(dist<=0.0) return;
+
+   double m1=(buy?tm.entry+dist/3.0:tm.entry-dist/3.0);
+   double m2=(buy?tm.entry+2.0*dist/3.0:tm.entry-2.0*dist/3.0);
+   double m3=(buy?tm.entry+0.90*dist:tm.entry-0.90*dist);
+
+   // Determine which bucket the live price is currently in. Post-TP1 uses a
+   // separate bucket (4) with TP1 as its lock and the rest handled by the
+   // existing PX_TM_ApplyPostTP1GivebackTrail logic (we only manage the
+   // pre-TP1 buckets 0..3 here to avoid colliding with that function).
+   int bucket=0;
+   double bucketLock=0.0;
+   if(tm.tp1Hit)
+   {
+      bucket=4; // post-TP1: handled by existing function, we only update state
+   }
+   else if(buy)
+   {
+      if(price>=m3)      { bucket=3; bucketLock=m3; }
+      else if(price>=m2) { bucket=2; bucketLock=m2; }
+      else if(price>=m1) { bucket=1; bucketLock=m1; }
+      else               { bucket=0; bucketLock=tm.entry; }
+   }
+   else
+   {
+      if(price<=m3)      { bucket=3; bucketLock=m3; }
+      else if(price<=m2) { bucket=2; bucketLock=m2; }
+      else if(price<=m1) { bucket=1; bucketLock=m1; }
+      else               { bucket=0; bucketLock=tm.entry; }
+   }
+
+   // Bucket transition: when price reaches a higher bucket, lock SL up to
+   // the new bucket's lock level (PX_TM_MoveSL enforces the never-backward
+   // rule) and reset the bucket peak/entry for fresh giveback tracking.
+   // Bucket 0 has no lock by design: the user wants the only close in
+   // "between entry and lock1" to be the 30% giveback, not a "touched entry"
+   // close. So we keep currentLock=0 in bucket 0 on every transition.
+   if(bucket!=tm.currentBucket)
+   {
+      tm.currentBucket=bucket;
+      tm.currentLock=(bucket>0 && bucket<4 ? bucketLock : 0.0);
+      // When entering a higher bucket, also try to push the broker SL to the
+      // new lock so the trade is always protected by the existing SL logic
+      // as well. PX_TM_MoveSL will no-op if the move would be backward.
+      if(bucket>0 && bucket<4)
+         PX_TM_MoveSL(tm,bucketLock,"staircase bucket transition");
+      // Reset peak tracking for the new bucket. Use the live price as the
+      // new bucket entry; bucketPeak follows it upward.
+      tm.bucketEntry=price;
+      tm.bucketPeak=price;
+      PX_TM_SavePersistence(tm);
+   }
+   else if(tm.bucketPeak<=0.0)
+   {
+      // First tick in this bucket: initialize peak.
+      tm.bucketEntry=price;
+      tm.bucketPeak=price;
+   }
+   else
+   {
+      // Update bucket peak with the live price.
+      if(buy && price>tm.bucketPeak) tm.bucketPeak=price;
+      if(!buy && price<tm.bucketPeak) tm.bucketPeak=price;
+   }
+
+   // Post-TP1 bucket is managed by PX_TM_ApplyPostTP1GivebackTrail; do not
+   // duplicate the close logic here. The bucket=4 transition above already
+   // happened; we just return.
+   if(bucket==4) return;
+
+   // Pre-TP1 buckets: two exit conditions.
+   // Exit A: price touches the current bucket's lock.
+   // Exit B: price gives back `givebackPct` of the bucket's favorable move
+   //         from peak.
+   bool touchedLock=false;
+   bool gaveBack=false;
+   double givebackDist=0.0;
+   if(tm.bucketPeak>0.0 && tm.bucketEntry>0.0)
+      givebackDist=MathAbs(tm.bucketPeak-tm.bucketEntry)*givebackPct/100.0;
+
+   if(buy)
+   {
+      if(tm.currentLock>0.0 && price<=tm.currentLock) touchedLock=true;
+      if(tm.bucketPeak>0.0 && givebackDist>0.0 && price<=tm.bucketPeak-givebackDist) gaveBack=true;
+   }
+   else
+   {
+      if(tm.currentLock>0.0 && price>=tm.currentLock) touchedLock=true;
+      if(tm.bucketPeak>0.0 && givebackDist>0.0 && price>=tm.bucketPeak+givebackDist) gaveBack=true;
+   }
+
+   if(touchedLock || gaveBack)
+   {
+      // Hard safety: never close a losing trade from this layer. If floating
+      // P/L is not positive, the existing SL / early-lock will handle the
+      // exit; we just skip.
+      double floating=PositionGetDouble(POSITION_PROFIT)+PositionGetDouble(POSITION_SWAP);
+      if(floating<=0.0) return;
+
+      string reason=StringFormat("staircase %s (bucket %d)",(touchedLock?"lock hit":"giveback"),bucket);
+      PX_TM_ClosePosition(tm,reason);
+   }
+}
+
+//+------------------------------------------------------------------+
+//| STAIRCASE ARMING                                                  |
+//|                                                                  |
+//| Called by the engine (caller decides the cadence: every tick,     |
+//| every new bar, etc). If the position is not yet armed and the     |
+//| floating P/L has reached `triggerPctOfRisk` of the live risk,     |
+//| this function arms the staircase and sets up bucket 0 with the    |
+//| entry price as the floor.                                         |
+//|                                                                  |
+//| Live risk = (entry - current broker SL) * value per unit * volume |
+//| if the broker has an SL on the position. Otherwise falls back to  |
+//| ts.riskMoney (the planned $ risk at setup time).                  |
+//|                                                                  |
+//| Safe to call every tick: it is a no-op once protectArmed is true. |
+//+------------------------------------------------------------------+
+void PX_TM_ArmStaircaseIfReady(PX_TradeManagerState &tm,double triggerPctOfRisk,double plannedRiskMoney)
+{
+   if(tm.protectArmed) return;
+   if(triggerPctOfRisk<=0.0) return;
+
+   ulong ticket;
+   if(!PX_TM_SelectPosition(ticket)) return;
+   long type=PositionGetInteger(POSITION_TYPE);
+   bool buy=(type==POSITION_TYPE_BUY);
+   double openPrice=PositionGetDouble(POSITION_PRICE_OPEN);
+   double curSL=PositionGetDouble(POSITION_SL);
+
+   // Live risk in account money.
+   double liveRisk=plannedRiskMoney;
+   double tickSize=SymbolInfoDouble(_Symbol,SYMBOL_TRADE_TICK_SIZE);
+   double tickValue=SymbolInfoDouble(_Symbol,SYMBOL_TRADE_TICK_VALUE);
+   double volume=PositionGetDouble(POSITION_VOLUME);
+   if(curSL>0.0 && openPrice>0.0 && tickSize>0.0 && tickValue>0.0 && volume>0.0)
+   {
+      double slDist=MathAbs(openPrice-curSL);
+      if(slDist>0.0) liveRisk=(slDist/tickSize)*tickValue*volume;
+   }
+   if(liveRisk<=0.0) return;
+
+   double triggerMoney=liveRisk*triggerPctOfRisk/100.0;
+   double floating=PositionGetDouble(POSITION_PROFIT)+PositionGetDouble(POSITION_SWAP);
+
+   // Floating must exceed the trigger AND be positive (so we never arm into
+   // a loss even if the math is favourable). Strict >= so the very first
+   // profitable tick that crosses the threshold arms it.
+   if(floating<=0.0) return;
+   if(floating<triggerMoney) return;
+
+   MqlTick tick;
+   string tickReason="";
+   if(!PX_TM_GetTick(tick,tickReason)) return;
+   double price=(buy?tick.bid:tick.ask);
+   if(price<=0.0) return;
+
+   tm.protectArmed=true;
+   tm.triggerMoney=triggerMoney;
+   tm.staircaseRisk=liveRisk;
+   tm.currentBucket=0;
+   tm.bucketEntry=tm.entry;          // bucket 0 floor = entry price
+   tm.bucketPeak=price;
+   tm.currentLock=0.0;               // bucket 0 has no upper lock yet
+   PX_TM_SavePersistence(tm);
+   PX_TM_SetAction(tm,StringFormat("Staircase armed: floating $%.2f >= trigger $%.2f (%.2f%% of risk $%.2f)",
+      floating,triggerMoney,triggerPctOfRisk,liveRisk));
+}
+
 double PX_TM_ATRBufferByRegime(const PX_RegimeState &reg,double atr)
 {
    double mult=0.10;
@@ -840,6 +1103,10 @@ bool PX_TM_UpdatePendingOrder(PX_TradeManagerState &tm,const PX_TradeSetup &ts,b
    {
       tm.entry=newPrice; tm.originalSL=plannedSL; tm.tp1=PX_NormPrice(ts.tp1); tm.tp2=newTP; tm.breakeven=PX_NormPrice(ts.breakeven);
       tm.earlyStage=0; tm.entryTimeframe=(int)_Period; tm.postTP1MidLocked=false; tm.postTP1Best=0.0; tm.preTP1Best=newPrice;
+      // Staircase protection: a refreshed pending order also means the staircase
+      // bucket state must reset (additive; no effect unless protection is on).
+      tm.protectArmed=false; tm.triggerMoney=0.0; tm.currentBucket=0;
+      tm.bucketPeak=0.0; tm.bucketEntry=0.0; tm.currentLock=0.0; tm.staircaseRisk=0.0;
       PX_TM_SavePersistence(tm);
       PX_TM_SetAction(tm,"Pending order updated from latest score/setup");
       return true;
