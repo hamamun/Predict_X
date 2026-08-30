@@ -862,9 +862,12 @@ bool PX_TM_ShouldCancelPending(const PX_Lifecycle &lc,const PX_ScoreResult &sr,c
    return false;
 }
 
-void PX_TM_OnInstantTick(PX_TradeManagerState &tm,bool enableAutoTrading,bool activePredictionMonitor,int currentSTDir)
+// Instant (between-bar) protection, unlinked from AUTO TRADE: these are
+// protective actions on EXISTING orders only - cancelling a tracked pending
+// order on an instant SuperTrend flip, and profit-protecting the open position.
+// Nothing here ever opens a new trade.
+void PX_TM_OnInstantTick(PX_TradeManagerState &tm,bool activePredictionMonitor,int currentSTDir)
 {
-   if(!enableAutoTrading) return;
    PX_TM_SyncFromPosition(tm);
    ulong order;
    if(PX_TM_SelectPending(order))
@@ -891,27 +894,38 @@ void PX_TM_OnNewBar(PX_TradeManagerState &tm,bool enableAutoTrading,bool useInit
    // to the broker-side TP/SL settings exactly as configured by the inputs.
    tm.dailyLossControlEnabled=(applyDailyLossLimit && enableTradeProtection);
    if(!tm.dailyLossControlEnabled) tm.dailyHalted=false;
-   if(tm.dailyLossControlEnabled && enableAutoTrading && PX_TM_DailyLimitHit(tm,dailyLossLimitPct))
+   // The daily loss limit is a PROTECTION: it still guards existing orders when
+   // AUTO TRADE is OFF (unlinked from the master switch).
+   if(tm.dailyLossControlEnabled && PX_TM_DailyLimitHit(tm,dailyLossLimitPct))
    {
       PX_TM_CancelPending(tm,"daily loss limit");
       PX_TM_ClosePosition(tm,"daily loss limit");
       tm.stateText="DAILY HALT";
       return;
    }
-   if(!PX_TM_TradingAllowed(tm,enableAutoTrading,tm.dailyLossControlEnabled,dailyLossLimitPct))
-   {
-      // Master switch OFF: no new orders and no modifications. Existing positions remain user-controlled.
+
+   // AUTO TRADE governs NEW orders and the active pending-order refresh only.
+   // Position protection below runs on its own switch (enableTradeProtection),
+   // so a user who disabled auto trading keeps protection on live orders.
+   bool autoAllowed=PX_TM_TradingAllowed(tm,enableAutoTrading,tm.dailyLossControlEnabled,dailyLossLimitPct);
+   // Without terminal trade permission nothing can execute at all - the old
+   // flow also stopped here, so behavior for AUTO ON is unchanged.
+   if(!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED) || !MQLInfoInteger(MQL_TRADE_ALLOWED))
       return;
-   }
 
    string reason="";
    if(PX_TM_SelectPending(tm.pendingTicket))
    {
+      // Protective cancel runs even with AUTO OFF: a dead, flipped or dangerous
+      // signal must not fill an order the EA is still tracking.
       if(PX_TM_ShouldCancelPending(lc,sr,reg,vc,reason))
       {
          PX_TM_CancelPending(tm,reason);
          return;
       }
+      // AUTO OFF: leave the pending order exactly as placed - no refresh, no
+      // market conversion, no replacement.
+      if(!autoAllowed) return;
       if(ts.valid && ts.method==PX_ENTRY_MARKET)
       {
          PX_TM_CancelPending(tm,"setup changed to market entry");
@@ -954,6 +968,8 @@ void PX_TM_OnNewBar(PX_TradeManagerState &tm,bool enableAutoTrading,bool useInit
       PX_LifecycleInit(lc);
    }
 
+   // --- Everything below places or refreshes orders: AUTO TRADE switch only. ---
+   if(!autoAllowed) return;
    if(reg.blockSignals || vc.spreadBlocked || !vc.sessionActive) return;
    if(lc.state==PX_STATE_PENDING && sr.tier>=PX_TIER_MEDIUM && ts.valid && !PX_TM_HasAnyManagedTrade())
    {
@@ -1004,8 +1020,10 @@ void PX_TM_RenderOrderPanel(PX_TradeManagerState &tm,bool showPanel,const PX_Tra
    PX2_Label("ORDER_TITLE",x+14,y,"PREDICT-X SETUP / ORDER MANAGER",(color)0xFFD8A8,12,"Segoe UI"); y+=24;
 
    int digs=(int)SymbolInfoInteger(_Symbol,SYMBOL_DIGITS);
-   string protectionLine=(!tm.enabled ? "1. AUTO TRADE OFF | PROTECTION: OFF" : "1. PROTECTION: "+(enableTradeProtection?"ON":"OFF"));
-   color protectionClr=(!tm.enabled ? clrTomato : (enableTradeProtection?(color)0x90EE90:(color)0xFFD8A8));
+   // AUTO TRADE and PROTECTION are independent switches: auto off stops NEW
+   // orders only; protection keeps managing the EA's existing orders.
+   string protectionLine="1. AUTO TRADE "+(tm.enabled?"ON":"OFF")+"  |  PROTECTION: "+(enableTradeProtection?"ON":"OFF");
+   color protectionClr=(enableTradeProtection?(color)0x90EE90:(color)0xFFD8A8);
    PX2_Label("ORDER_STATE",x+14,y,protectionLine,protectionClr,11); y+=21;
 
    // Signal/type is intentionally not repeated here. The left panel is the
@@ -1051,7 +1069,7 @@ void PX_TM_RenderOrderPanel(PX_TradeManagerState &tm,bool showPanel,const PX_Tra
    y+=18;
    PX2_Label("ORDER_TF",x+34,y,StringFormat("ENTRY TF: %s | CHART TF: %s",PX_TFToString((ENUM_TIMEFRAMES)tm.entryTimeframe),PX_TFToString(_Period)),(tm.entryTimeframe>0 && tm.entryTimeframe!=(int)_Period?(color)0x80D7FF:(color)0xD0D0D0),11); y+=20;
 
-   if(enableTradeProtection && tm.enabled)
+   if(enableTradeProtection)
    {
       PX2_Label("SEC_PROTECT",x+14,y,"5. PROTECTION STATUS",(color)0xE8E8E8,11,"Segoe UI"); y+=19;
       PX2_Label("ORDER_EARLY",x+34,y,StringFormat("EARLY LOCK: %d/3 | BEST: %s",tm.earlyStage,(tm.preTP1Best>0?DoubleToString(tm.preTP1Best,digs):"-")),(color)0x80D7FF,11); y+=18;

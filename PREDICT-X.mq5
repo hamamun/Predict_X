@@ -73,6 +73,7 @@ PX_SMCLevels    g_smc;
 
 PX_ScoreDetail  g_d1,g_d2,g_d3,g_d4,g_d5,g_d6;
 PX_ScoreResult  g_score;
+PX_DisplayState g_disp;   // panel-only mirror: the REAL voting, even while blocked
 PX_ValueContext g_value;
 PX_TrendContext g_trend;
 double          g_aiFeatures[12];
@@ -316,6 +317,18 @@ PX_Direction PX_PrimaryDirection(const PX_TrendContext &tc,double closePrice,dou
    return PX_DIR_NONE;
 }
 
+// Display helper: the SAME 4 votes as PX_PrimaryDirection, but exposes the
+// split so the panel can show "3-1 BUY". Copy only - the live function above
+// is untouched and remains the single source of the trading direction.
+void PX_CountDirectionVotes(const PX_TrendContext &tc,double closePrice,double vwap,int &bull,int &bear)
+{
+   bull=0; bear=0;
+   if(tc.stDir>0) bull++; else if(tc.stDir<0) bear++;
+   if(closePrice>vwap) bull++; else if(closePrice<vwap) bear++;
+   if(tc.rsi>=50.0) bull++; else bear++;
+   if(tc.ttmHist>0.0) bull++; else if(tc.ttmHist<0.0) bear++;
+}
+
 void PX_ReadContexts()
 {
    PX_Preset ap=g_regime.adjusted;
@@ -388,8 +401,19 @@ void PX_ResetScoreResult(PX_ScoreResult &sr)
 void PX_CalculateScores()
 {
    PX_ResetScoreResult(g_score);
+   PX_DisplayReset(g_disp);
    g_score.dir=PX_PrimaryDirection(g_trend,g_value.price,g_value.vwap);
-   if(!g_value.dataReady || g_score.dir==PX_DIR_NONE || g_regime.blockSignals || g_value.spreadBlocked)
+   PX_CountDirectionVotes(g_trend,g_value.price,g_value.vwap,g_disp.bullVotes,g_disp.bearVotes);
+   g_disp.dir=g_score.dir;
+
+   // Engine veto state (dangerous regime or spread). The ENGINE path below is
+   // still force-zeroed exactly as before; only the panel mirror keeps the
+   // real voting so the user always sees the true score.
+   bool blockedNow=(g_regime.blockSignals || g_value.spreadBlocked);
+   g_disp.blocked=blockedNow;
+   g_disp.blockReason=(g_regime.blockSignals?g_regime.name:(g_value.spreadBlocked?"spread too high":""));
+
+   if(!g_value.dataReady || g_score.dir==PX_DIR_NONE)
    {
       PX_ResetDetail(g_d1,"SMART MONEY",25); PX_ResetDetail(g_d2,"TREND/MOM",25); PX_ResetDetail(g_d3,"INST VALUE/VOL",20);
       PX_ResetDetail(g_d4,"HTF CONFLUENCE",15); PX_ResetDetail(g_d5,"MARKOV STATE",15); PX_ResetDetail(g_d6,"AI CONFIRM",10);
@@ -398,6 +422,10 @@ void PX_CalculateScores()
       return;
    }
 
+   // The 6 layers are now computed ALWAYS (also on blocked bars) so the panel
+   // can show the real voting. The ENGINE result is force-zeroed again below
+   // when blocked, so every trading decision, the AI preparation, the memory
+   // bank and the trade manager see byte-identical values to before.
    PX_Preset ap=g_regime.adjusted;
    g_score.layer2=PX_ScoreLayer2(g_score.dir,g_trend,g_d2);
    g_score.layer3=PX_ScoreLayer3(g_score.dir,g_value,g_d3);
@@ -411,11 +439,19 @@ void PX_CalculateScores()
    features[0]=(double)preAI;
    features[1]=(double)g_score.layer1; features[2]=(double)g_score.layer2; features[3]=(double)g_score.layer3; features[4]=(double)g_score.layer4; features[5]=(double)g_score.layer5;
    features[6]=g_regime.er; features[7]=g_regime.atrRatio; features[8]=g_regime.adx; features[9]=g_trend.rsi; features[10]=(double)g_trend.stDir; features[11]=g_trend.ttmSqueeze;
-   for(int fi=0;fi<12;fi++) g_aiFeatures[fi]=features[fi];
-   if(InpEnableAIEnhancement)
-      PX3_PrepareAI(g_neural,g_score.dir,PX_ClassifyTier(preAI),features);
-   else
-      PX_NeuralSetLearning(g_neural,"ONLINE AI OFF");
+   // AI prepare only on non-blocked bars - identical to the old early-return
+   // flow, where blocked bars never reached this code. This keeps the neural
+   // state and g_aiFeatures learning exactly as before.
+   if(!blockedNow)
+   {
+      for(int fi=0;fi<12;fi++) g_aiFeatures[fi]=features[fi];
+      if(InpEnableAIEnhancement)
+         PX3_PrepareAI(g_neural,g_score.dir,PX_ClassifyTier(preAI),features);
+      else
+         PX_NeuralSetLearning(g_neural,"ONLINE AI OFF");
+   }
+   // Layer 6 is a pure read of the neural state (no mutation), so it is safe
+   // to evaluate for display on blocked bars too.
    double conf; PX_Direction aiDir;
    g_score.layer6=PX_ScoreLayer6(g_neural,g_score.dir,features,g_d6,conf,aiDir);
 
@@ -429,6 +465,20 @@ void PX_CalculateScores()
    g_score.tier=PX_ClassifyTier(g_score.total);
    g_score.spreadBlocked=g_value.spreadBlocked;
    g_score.signalText=PX_TierText(g_score.tier)+" "+PX_DirectionText(g_score.dir);
+
+   // Panel mirror: the REAL voting, always.
+   g_disp.valid=true;
+   g_disp.total=g_score.total;
+   g_disp.tier=g_score.tier;
+
+   // ENGINE copy: force-zero when blocked - exactly the old behavior, field
+   // by field (dir and spreadBlocked keep their live values, as before).
+   if(blockedNow)
+   {
+      g_score.layer1=0; g_score.layer2=0; g_score.layer3=0; g_score.layer4=0; g_score.layer5=0; g_score.layer6=0; g_score.candleBonus=0;
+      g_score.total=0; g_score.tier=PX_TIER_NO_TRADE;
+      g_score.signalText=(g_regime.blockSignals?"Blocked: dangerous regime":"Blocked: spread > 2x normal");
+   }
 }
 
 //+------------------------------------------------------------------+
@@ -528,7 +578,7 @@ void PX_OnNewClosedBar()
    bool effectiveDailyLoss=(InpEnableTradeProtection && InpApplyDailyLossLimit);
    string toggRest=StringFormat("SL %s  ·  FUTURE VIEW %s  ·  DAILY %s",(InpUseInitialStopLoss?"ON":"OFF"),(InpPXM_ShowFutureView?"ON":"OFF"),(effectiveDailyLoss?"ON":"OFF"));
    string fvStatus=PXM_FutureViewStatus(g_value.atr,(g_setup.valid?g_setup.entry:0.0),(g_setup.valid?g_setup.sl:0.0));
-   PX_RenderPanel(InpShowPanel,_Symbol,_Period,g_regime,g_d1,g_d2,g_d3,g_d4,g_d5,g_d6,g_score,g_setup,g_value,g_trend,g_lifecycle,g_basePreset.warning,g_signalsToday,g_winsToday,g_lossesToday,0,InpEnableAutoTrading,toggRest,fvStatus,PX_BuildSummaryText(),PX_TM_ShortAction(g_tm.lastAction),PX_ShortTime(g_tm.lastActionTime));
+   PX_RenderPanel(InpShowPanel,_Symbol,_Period,g_regime,g_d1,g_d2,g_d3,g_d4,g_d5,g_d6,g_score,g_disp,g_setup,g_value,g_trend,g_lifecycle,g_basePreset.warning,g_signalsToday,g_winsToday,g_lossesToday,0,InpEnableAutoTrading,toggRest,fvStatus,PX_BuildSummaryText(),PX_TM_ShortAction(g_tm.lastAction),PX_ShortTime(g_tm.lastActionTime));
    PX_TM_RenderOrderPanel(g_tm,InpShowPanel,g_setup,g_score,g_lifecycle,InpEnableTradeProtection);
    ChartRedraw(0);
 }
@@ -610,8 +660,10 @@ void OnTick()
 {
    PX_CheckInstantPendingFlip();
    double liveSTDir=0.0;
-   if(PX_Copy1(g_hST,1,0,liveSTDir)) PX_TM_OnInstantTick(g_tm,InpEnableAutoTrading,(InpEnableTradeProtection && InpActivePredictionMonitor),(liveSTDir>0?1:(liveSTDir<0?-1:0)));
-   if(InpEnableAutoTrading && InpEnableTradeProtection)
+   if(PX_Copy1(g_hST,1,0,liveSTDir)) PX_TM_OnInstantTick(g_tm,(InpEnableTradeProtection && InpActivePredictionMonitor),(liveSTDir>0?1:(liveSTDir<0?-1:0)));
+   // Tick-level protection is NOT linked to AUTO TRADE: with auto OFF the EA
+   // opens nothing new, but still guards its existing position.
+   if(InpEnableTradeProtection)
    {
       PX_TM_ApplyEarlyProfitLock(g_tm);
       PX_TM_CheckTP1(g_tm);
@@ -643,7 +695,7 @@ void OnTimer()
    bool effectiveDailyLoss=(InpEnableTradeProtection && InpApplyDailyLossLimit);
    string toggRest=StringFormat("SL %s  ·  FUTURE VIEW %s  ·  DAILY %s",(InpUseInitialStopLoss?"ON":"OFF"),(InpPXM_ShowFutureView?"ON":"OFF"),(effectiveDailyLoss?"ON":"OFF"));
    string fvStatus=PXM_FutureViewStatus(g_value.atr,(g_setup.valid?g_setup.entry:0.0),(g_setup.valid?g_setup.sl:0.0));
-   PX_RenderPanel(InpShowPanel,_Symbol,_Period,g_regime,g_d1,g_d2,g_d3,g_d4,g_d5,g_d6,g_score,g_setup,g_value,g_trend,g_lifecycle,g_basePreset.warning,g_signalsToday,g_winsToday,g_lossesToday,0,InpEnableAutoTrading,toggRest,fvStatus,PX_BuildSummaryText(),PX_TM_ShortAction(g_tm.lastAction),PX_ShortTime(g_tm.lastActionTime));
+   PX_RenderPanel(InpShowPanel,_Symbol,_Period,g_regime,g_d1,g_d2,g_d3,g_d4,g_d5,g_d6,g_score,g_disp,g_setup,g_value,g_trend,g_lifecycle,g_basePreset.warning,g_signalsToday,g_winsToday,g_lossesToday,0,InpEnableAutoTrading,toggRest,fvStatus,PX_BuildSummaryText(),PX_TM_ShortAction(g_tm.lastAction),PX_ShortTime(g_tm.lastActionTime));
    PX_TM_RenderOrderPanel(g_tm,InpShowPanel,g_setup,g_score,g_lifecycle,InpEnableTradeProtection);
    if(InpShowPanel)
       ChartRedraw(0);
