@@ -301,7 +301,7 @@ void PX_RenderDetail(int &y,const PX_ScoreDetail &d)
    y+=6;
 }
 
-void PX_RenderPanel(bool showPanel,string symbol,ENUM_TIMEFRAMES tf,const PX_RegimeState &reg,const PX_ScoreDetail &l1,const PX_ScoreDetail &l2,const PX_ScoreDetail &l3,const PX_ScoreDetail &l4,const PX_ScoreDetail &l5,const PX_ScoreDetail &l6,const PX_ScoreResult &sr,const PX_TradeSetup &ts,const PX_ValueContext &vc,const PX_TrendContext &tc,const PX_Lifecycle &lc,string warning,int signalsToday,int wins,int losses,int streak,const bool autoTradingOn,const string togglesRest,const string fvStatus,const string summary,const string lastAction,const string lastActionTime)
+void PX_RenderPanel(bool showPanel,string symbol,ENUM_TIMEFRAMES tf,const PX_RegimeState &reg,const PX_ScoreDetail &l1,const PX_ScoreDetail &l2,const PX_ScoreDetail &l3,const PX_ScoreDetail &l4,const PX_ScoreDetail &l5,const PX_ScoreDetail &l6,const PX_ScoreResult &sr,const PX_DisplayState &ds,const PX_TradeSetup &ts,const PX_ValueContext &vc,const PX_TrendContext &tc,const PX_Lifecycle &lc,string warning,int signalsToday,int wins,int losses,int streak,const bool autoTradingOn,const string togglesRest,const string fvStatus,const string summary,const string lastAction,const string lastActionTime)
 {
    PX_DeletePanelObjects();
    if(!showPanel) return;
@@ -324,79 +324,125 @@ void PX_RenderPanel(bool showPanel,string symbol,ENUM_TIMEFRAMES tf,const PX_Reg
    PX_Label("TOG_REST",150,y,togglesRest,clrSilver,9,"Consolas","Core protection/display switches.");
    y+=20;
 
-   // ---- Market regime (name + the metrics you asked to keep) ----
+   // ---- Market regime (name + trend word from the SAME 4 votes the EA uses) ----
    PX_Label("MRH",14,y,"-- MARKET REGIME -------------------------",clrWhite,10,"Segoe UI"); y+=17;
-   PX_Label("MR1",14,y,"MARKET:  "+reg.name,reg.clr,11); y+=18;
+   string trendWord=(ds.bullVotes>ds.bearVotes?"TREND UP":(ds.bearVotes>ds.bullVotes?"TREND DOWN":"SIDEWAYS"));
+   PX_Label("MR1",14,y,"MARKET:  "+reg.name+"  ·  "+trendWord,reg.clr,11,"Segoe UI","Market regime plus the trend word. The trend word comes from the same 4 direction votes the EA uses, so this line can never contradict the DIRECTION line.");
+   y+=18;
    PX_Label("MR2",14,y,StringFormat("ADX %.1f   |   ER %.2f   |   ATR ratio %.2f",reg.adx,reg.er,reg.atrRatio),clrSilver,9,"Consolas","ADX = trend strength, ER = efficiency, ATR ratio = volatility. Higher ADX + efficient = cleaner trend.");
    y+=20;
 
-   // ---- Score (medium loud) ----
+   // ---- Score: the REAL voting, always shown, never forced to 0 ----
    PX_Label("SCR_TOP",14,y,"===============================================",clrDimGray,10); y+=14;
-   color scoreClr=(sr.total>=85?clrLime:(sr.total>=70?clrLime:(sr.total>=55?clrGold:(sr.total>=40?clrOrange:clrSilver))));
-   PX_Label("SCORE",14,y,StringFormat("SCORE  %3d / 100  ·  %s",sr.total,PX_TierText(sr.tier)),scoreClr,12,"Segoe UI","Combined 0-100 confidence. Higher = cleaner setup.");
+   int gate=(reg.adjusted.minScore>0?reg.adjusted.minScore:55);
+   int expBars=(reg.adjusted.signalExpiryBars>0?reg.adjusted.signalExpiryBars:3);
+   string scoreText;
+   color scoreClr=clrSilver;
+   if(ds.valid)
+   {
+      scoreText=StringFormat("SCORE  %3d / 100  ·  %s  ·  needs %d",ds.total,PX_TierText(ds.tier),gate);
+      // Grey = blocked: the number is information only, not permission.
+      if(ds.blocked) scoreClr=clrDarkGray;
+      else scoreClr=(ds.total>=gate?clrLime:(ds.total>=gate-10?clrGold:clrSilver));
+   }
+   else
+      scoreText=StringFormat("SCORE   -- / 100  ·  no score yet  ·  needs %d",gate);
+   PX_Label("SCORE",14,y,scoreText,scoreClr,12,"Segoe UI","The real 0-100 voting, always shown - a blocked market no longer hides it. Grey means the market is blocked: the number is information only, the DIRECTION line decides. 'needs' is the minimum score the current regime requires (timeframe base, regime-adjusted).");
    y+=18;
    PX_Label("SCR_BOT",14,y,"===============================================",clrDimGray,10); y+=18;
 
-   // ---- Signal (loud) + plain "Why" ----
-   // Display only, but now driven by the SAME gate the engine uses instead of
-   // the fixed MEDIUM tier (55): g_regime.adjusted.minScore (55 base, 60 on M5,
-   // regime-tuned -5/+5/+10) plus the live signal state. A live/armed signal
-   // keeps its direction here until it expires or flips, so this line can no
-   // longer say WATCH while the order manager panel says BUY.
-   int gate=(reg.adjusted.minScore>0?reg.adjusted.minScore:55);
-   int expBars=(reg.adjusted.signalExpiryBars>0?reg.adjusted.signalExpiryBars:3);
-   string sigLine="WATCH";
+   // ---- Direction: one decision word + what physically exists ----
+   // BUY / SELL = act now, or a live order/trade in that direction.
+   // HOLD = do nothing, always with the reason (blocked, no direction, or
+   // score below the gate). A live/armed signal owns its direction
+   // (lc.pendingDir); the current bar's lean is only a footnote.
+   string sigLine="HOLD";
    color sigClr=clrSilver;
    if(lc.state==PX_STATE_ACTIVE || lc.state==PX_STATE_PENDING)
    {
-      // A live/armed signal owns its direction (lc.pendingDir); the current bar's
-      // lean may already have faded or flipped, so it is only a footnote.
       PX_Direction liveDir=(lc.pendingDir!=PX_DIR_NONE?lc.pendingDir:sr.dir);
-      string stateTag=(lc.state==PX_STATE_ACTIVE?"IN TRADE":StringFormat("LIVE %d/%d",lc.barsWaiting,expBars));
-      string head=(liveDir!=PX_DIR_NONE?PX_DirectionText(liveDir)+"  ·  ":"");
-      string leanTag=(liveDir!=PX_DIR_NONE && sr.dir!=PX_DIR_NONE && sr.dir!=liveDir?"  ·  lean "+PX_DirectionText(sr.dir):"");
-      sigLine=head+stateTag+leanTag;
-      sigClr=(liveDir==PX_DIR_BUY?clrLime:(liveDir==PX_DIR_SELL?clrTomato:clrSilver));
-   }
-   else if(sr.dir!=PX_DIR_NONE)
-   {
-      if(reg.blockSignals)
-         sigLine="BLOCKED  ·  "+reg.name;
-      else if(vc.spreadBlocked)
-         sigLine="BLOCKED  ·  spread too high";
-      else if(sr.total>=gate)
+      if(liveDir==PX_DIR_NONE) liveDir=ds.dir;
+      if(liveDir!=PX_DIR_NONE)
       {
-         sigLine=PX_DirectionText(sr.dir)+"  ·  "+PX_TierText(sr.tier);
-         sigClr=(sr.dir==PX_DIR_BUY?clrLime:clrTomato);
+         string stateTag=(lc.state==PX_STATE_ACTIVE?"open trade":
+                          ((ts.valid && ts.method!=PX_ENTRY_MARKET)?StringFormat("limit waiting %d/%d",lc.barsWaiting,expBars):"signal armed"));
+         string leanTag=(ds.dir!=PX_DIR_NONE && ds.dir!=liveDir?"  ·  lean "+PX_DirectionText(ds.dir):"");
+         sigLine=PX_DirectionText(liveDir)+"  ·  "+stateTag+leanTag;
+         sigClr=(liveDir==PX_DIR_BUY?clrLime:clrTomato);
       }
-      else
-         sigLine=StringFormat("WATCH  ·  score %d < %d",sr.total,gate);
    }
-   PX_Label("SIGNAL",14,y,sigLine,sigClr,14,"Segoe UI","The loud decision line. It uses the engine's own gate, not a fixed threshold: the score must reach the regime-adjusted minimum (currently "+IntegerToString(gate)+"), the market must not be blocked, and a signal already armed stays live for "+IntegerToString(expBars)+" bars. WATCH = nothing to trade, even if the right panel still shows a live order from an earlier bar.");
+   else if(reg.blockSignals)
+   {
+      sigLine="HOLD  ·  blocked: "+reg.name;
+      sigClr=clrGray;
+   }
+   else if(vc.spreadBlocked)
+   {
+      sigLine="HOLD  ·  blocked: spread too high";
+      sigClr=clrGray;
+   }
+   else if(!ds.valid || sr.dir==PX_DIR_NONE)
+   {
+      if(ds.bullVotes==ds.bearVotes)
+         sigLine=StringFormat("HOLD  ·  no direction (%d-%d votes)",ds.bullVotes,ds.bearVotes);
+      else
+         sigLine=StringFormat("HOLD  ·  no score yet (%d-%d votes)",ds.bullVotes,ds.bearVotes);
+   }
+   else if(sr.total>=gate)
+   {
+      sigLine=PX_DirectionText(sr.dir)+"  ·  "+PX_TierText(sr.tier);
+      sigClr=(sr.dir==PX_DIR_BUY?clrLime:clrTomato);
+   }
+   else
+   {
+      sigLine=StringFormat("HOLD  ·  %d points short of %d",gate-sr.total,gate);
+      sigClr=clrGold;
+   }
+   PX_Label("SIGNAL",14,y,sigLine,sigClr,14,"Segoe UI","One decision word. BUY/SELL = actionable now, or a live trade/order in that direction ('open trade' = position exists, 'limit waiting n/"+IntegerToString(expBars)+"' = limit order placed, expires after that many bars). HOLD = do nothing, with the reason: blocked market, no clear direction, or score below the gate ("+IntegerToString(gate)+").");
    y+=24;
 
+   // ---- Why: one sentence, always the same shape: votes -> score vs gate -> blocker ----
+   int vHi=(ds.bullVotes>ds.bearVotes?ds.bullVotes:ds.bearVotes);
+   int vLo=(ds.bullVotes>ds.bearVotes?ds.bearVotes:ds.bullVotes);
+   string voteTxt=StringFormat("%d-%d %s",vHi,vLo,
+      (ds.bullVotes>ds.bearVotes?"BUY":(ds.bearVotes>ds.bullVotes?"SELL":"tie")));
+   string scoreTxt=(ds.valid?IntegerToString(ds.total):"no score");
    string why="";
    if(lc.state==PX_STATE_ACTIVE && lc.pendingDir!=PX_DIR_NONE)
-      why="Why: managing the live "+PX_DirectionText(lc.pendingDir)+" trade, not a new signal.";
+   {
+      why="Why "+PX_DirectionText(lc.pendingDir)+" · open trade: protection (TP/trail) decides the exit, not today's score";
+      if(ds.valid && ds.dir!=PX_DIR_NONE && ds.dir!=lc.pendingDir) why+=" (bar now leans "+PX_DirectionText(ds.dir)+")";
+      why+=".";
+   }
    else if(lc.state==PX_STATE_PENDING)
-      why=StringFormat("Why: signal armed, waiting for its entry (%d/%d bars).",lc.barsWaiting,expBars);
+   {
+      PX_Direction pd=(lc.pendingDir!=PX_DIR_NONE?lc.pendingDir:sr.dir);
+      why=StringFormat("Why %s: votes %s, score %s over gate %d - order waits up to %d bars.",PX_DirectionText(pd),voteTxt,scoreTxt,gate,expBars);
+   }
    else if(reg.blockSignals)
-      why="Why: market unsafe - "+reg.name+".";
+      why=StringFormat("Why HOLD: votes %s, %s, but the market is %s - trading paused.",voteTxt,scoreTxt,reg.name);
    else if(vc.spreadBlocked)
-      why="Why: costs too high - waiting.";
-   else if(sr.dir!=PX_DIR_NONE)
+      why=StringFormat("Why HOLD: votes %s, %s, but the spread is over 2x normal - costs too high.",voteTxt,scoreTxt);
+   else if(!ds.valid || sr.dir==PX_DIR_NONE)
+   {
+      if(ds.bullVotes==ds.bearVotes)
+         why=StringFormat("Why HOLD: the 4 direction votes split %d-%d - no clear direction to score.",ds.bullVotes,ds.bearVotes);
+      else
+         why=StringFormat("Why HOLD: votes %s, but the data is not ready to score yet.",voteTxt);
+   }
+   else if(sr.total>=gate)
    {
       bool buy=(sr.dir==PX_DIR_BUY);
       bool stAgree=(buy && tc.stDir>0)||(!buy && tc.stDir<0);
       bool vwAgree=(buy && vc.price>vc.vwap)||(!buy && vc.price<vc.vwap);
       string driver=(stAgree && vwAgree)?"trend and value agree":(stAgree?"the trend agrees":(vwAgree?"price is on the value side":"momentum-led"));
-      why="Why: leaning "+(buy?"up":"down")+" - "+driver+".";
+      why=StringFormat("Why %s: votes %s, score %d over gate %d - %s.",PX_DirectionText(sr.dir),voteTxt,sr.total,gate,driver);
    }
    else
-      why="Why: no strong setup yet.";
+      why=StringFormat("Why HOLD: votes %s, score %d - needs %d (%d points short).",voteTxt,sr.total,gate,gate-sr.total);
    // Wrapped as a safety net: this line embeds the dynamic regime name, and a
    // label cannot wrap itself. One line still costs exactly the old 24px.
-   y=PX_RenderWrappedLines("WHY",PX_TEXT_X,y,why,clrSilver,10,"Consolas","Short plain-language reason for the current state.",0,2)+6;
+   y=PX_RenderWrappedLines("WHY",PX_TEXT_X,y,why,clrSilver,10,"Consolas","Plain-language reason: direction votes, score vs gate, and any blocker.",0,3)+6;
 
    // ---- Six sub-scores, two lines, xx/xx (xx%) ----
    PX_Label("SUB_H",14,y,"-- LAYER SCORES --------------------------",clrWhite,9,"Segoe UI"); y+=15;

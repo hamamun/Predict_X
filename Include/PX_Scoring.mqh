@@ -42,6 +42,29 @@ PX_Tier PX_ClassifyTier(int score)
    return PX_TIER_NO_TRADE;
 }
 
+// --- Display-only mirror of the score (panel clarity upgrade).
+//     The engine keeps its own PX_ScoreResult and still force-zeroes it when
+//     the market is blocked (unchanged trading behavior). This struct carries
+//     the REAL voting to the panel, so the user always sees the true score.
+//     Nothing in the trading path ever reads this struct.
+struct PX_DisplayState
+{
+   bool        valid;        // direction existed + data ready -> a real voting exists
+   int         total;        // the real score 0-100 (never force-zeroed)
+   PX_Tier     tier;         // the real tier of total
+   PX_Direction dir;         // primary direction the 4 votes gave this bar
+   int         bullVotes;    // direction votes for up (of 4)
+   int         bearVotes;    // direction votes for down (of 4)
+   bool        blocked;      // the engine vetoed trading this bar (danger or spread)
+   string      blockReason;  // short human-readable reason
+};
+
+void PX_DisplayReset(PX_DisplayState &ds)
+{
+   ds.valid=false; ds.total=0; ds.tier=PX_TIER_NO_TRADE; ds.dir=PX_DIR_NONE;
+   ds.bullVotes=0; ds.bearVotes=0; ds.blocked=false; ds.blockReason="";
+}
+
 string PX_TierText(PX_Tier t)
 {
    if(t==PX_TIER_VERY_STRONG) return "VERY STRONG";
