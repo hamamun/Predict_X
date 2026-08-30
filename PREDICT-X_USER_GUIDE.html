@@ -3,58 +3,345 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>PREDICT-X User Guide</title>
+<title>PREDICT-X User Guide — v2.00</title>
 <style>
-  :root{--bg:#0f1115;--panel:#171b22;--panel2:#202632;--text:#e7e7e7;--muted:#b8c0cc;--cyan:#7fdcff;--green:#8df0a4;--red:#ff8e8e;--yellow:#ffd56a;--orange:#ffb36a;--line:#333b4a}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:Segoe UI,Arial,sans-serif;line-height:1.55;padding:28px}.wrap{max-width:1100px;margin:0 auto}h1{color:var(--cyan);font-size:34px;margin:0 0 6px}h2{color:var(--cyan);border-bottom:1px solid var(--line);padding-bottom:6px;margin-top:34px}h3{color:var(--yellow);margin-top:22px}.sub{color:var(--muted);font-size:16px;margin-bottom:20px}.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px;margin:16px 0;box-shadow:0 0 0 1px rgba(255,255,255,.02)}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:14px}code,pre{background:#0b0d12;color:#d8f7ff;border:1px solid #2b3340;border-radius:8px}code{padding:2px 6px}pre{padding:12px;overflow:auto}table{width:100%;border-collapse:collapse;margin:12px 0;background:var(--panel)}th,td{border:1px solid var(--line);padding:10px;text-align:left;vertical-align:top}th{background:var(--panel2);color:var(--cyan)}.ok{color:var(--green);font-weight:600}.warn{color:var(--orange);font-weight:600}.bad{color:var(--red);font-weight:600}.note{color:var(--yellow);font-weight:600}.small{font-size:13px;color:var(--muted)}
+  :root{--bg:#0f1115;--panel:#171b22;--panel2:#202632;--text:#e7e7e7;--muted:#b8c0cc;--cyan:#7fdcff;--green:#8df0a4;--red:#ff8e8e;--yellow:#ffd56a;--orange:#ffb36a;--line:#333b4a}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);font-family:Segoe UI,Arial,sans-serif;line-height:1.55;padding:28px}
+  .wrap{max-width:1100px;margin:0 auto}
+  h1{color:var(--cyan);font-size:34px;margin:0 0 6px}
+  h2{color:var(--cyan);border-bottom:1px solid var(--line);padding-bottom:6px;margin-top:34px}
+  h3{color:var(--yellow);margin-top:22px}
+  .sub{color:var(--muted);font-size:16px;margin-bottom:20px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px;margin:16px 0;box-shadow:0 0 0 1px rgba(255,255,255,.02)}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:14px}
+  code,pre{background:#0b0d12;color:#d8f7ff;border:1px solid #2b3340;border-radius:8px}
+  code{padding:2px 6px}
+  pre{padding:12px;overflow:auto}
+  table{width:100%;border-collapse:collapse;margin:12px 0;background:var(--panel)}
+  th,td{border:1px solid var(--line);padding:10px;text-align:left;vertical-align:top}
+  th{background:var(--panel2);color:var(--cyan)}
+  .ok{color:var(--green);font-weight:600}
+  .warn{color:var(--orange);font-weight:600}
+  .bad{color:var(--red);font-weight:600}
+  .note{color:var(--yellow);font-weight:600}
+  .small{font-size:13px;color:var(--muted)}
+  .tag{display:inline-block;background:var(--panel2);border:1px solid var(--line);border-radius:999px;padding:2px 10px;font-size:12px;color:var(--cyan);margin-left:6px}
+  .new{border-left:3px solid var(--green);padding-left:14px}
+  ul,ol{margin:8px 0 8px 22px;padding:0}
+  li{margin:4px 0}
 </style>
 </head>
 <body><div class="wrap">
+
 <h1>PREDICT-X User Guide</h1>
-<div class="sub">Latest build guide — prediction, scoring, optional auto-trading, online AI, candlestick confirmation, and smart trade management.</div>
+<div class="sub">Version 2.00 — 6-layer scoring, the Aladin memory bank, optional auto-trading, and staircase trade protection.</div>
 
-<div class="card"><h2>1. What PREDICT-X Does</h2><p>PREDICT-X is a MetaTrader 5 Expert Advisor that analyzes closed candles, scores market conditions, predicts BUY/SELL/NO TRADE, and optionally places/manages trades.</p><p><span class="ok">Native MT5/MQL5 only.</span> <span class="ok">No martingale.</span> <span class="ok">No grid.</span> <span class="ok">Closed-bar signals only.</span></p></div>
+<div class="card">
+<h2>1. What PREDICT-X Does</h2>
+<p>PREDICT-X is a MetaTrader 5 Expert Advisor. It analyses <strong>closed candles</strong>, scores market conditions across six layers, predicts BUY / SELL / NO TRADE, and — only if you switch it on — places and manages trades for you.</p>
+<p>Version 2.00 adds the <strong>Aladin memory bank</strong>: the EA rehearses its own scoring over the last 3,000 bars of your chart, remembers how similar setups actually ended, and uses that history to place smarter stops, resize or refuse weak setups, and upgrade entries it has high confidence in.</p>
+<p><span class="ok">Native MT5 / MQL5 only.</span> <span class="ok">No martingale.</span> <span class="ok">No grid.</span> <span class="ok">Closed-bar signals only.</span> <span class="ok">Single position per symbol.</span> <span class="ok">No external APIs or DLLs.</span></p>
+</div>
 
-<h2>2. Installation</h2><div class="card"><pre>MQL5/Experts/PREDICT-X/PREDICT-X.mq5
+<div class="card new">
+<h2>2. What's New in 2.00</h2>
+<table>
+<tr><th>Area</th><th>What changed</th></tr>
+<tr><td><strong>Aladin memory bank</strong></td><td>New. Rehearsal over past bars + k-NN lookup of similar setups. Feeds the FUTURE VIEW panel block and Phase B trade actions.</td></tr>
+<tr><td><strong>Phase B trade actions</strong></td><td>New. Memory may widen SL to cover the measured dip, rebuild TP1/TP2 in R-multiples, halve the lot, refuse a weak setup, or upgrade a limit entry to market.</td></tr>
+<tr><td><strong>Staircase protection</strong></td><td>New. Once a trade is in profit by a set share of risk, profit is locked bucket by bucket and the position closes early on a giveback.</td></tr>
+<tr><td><strong>Panels</strong></td><td>Rebuilt. The left panel always shows the <em>real</em> score and a plain BUY / SELL / HOLD direction, even when a gate is blocking the trade. The right order panel is narrower.</td></tr>
+<tr><td><strong>Protection is independent</strong></td><td>Trade protection no longer depends on auto-trading. With auto-trading OFF the EA opens nothing new but still guards a position you already have.</td></tr>
+<tr><td><strong>Alerts</strong></td><td>Trade lifecycle and TP/SL alert categories are on by default; delivery channels stay off until you enable them.</td></tr>
+</table>
+<p class="small">Version 1 of this guide documented the pre-Aladin build. Everything below describes 2.00.</p>
+</div>
+
+<h2>3. Installation</h2>
+<div class="card">
+<p>Copy the files to these exact paths inside your MT5 data folder (<span class="small">File → Open Data Folder</span>):</p>
+<pre>MQL5/Experts/PREDICT-X/PREDICT-X.mq5
 MQL5/Experts/PREDICT-X/Include/*.mqh
 MQL5/Indicators/PREDICT-X/Indicators/SuperTrend.mq5
 MQL5/Indicators/PREDICT-X/Indicators/TTMSqueeze.mq5
-MQL5/Indicators/PREDICT-X/Indicators/KeltnerChannel.mq5</pre><ol><li>Compile the three indicators first.</li><li>Compile <code>PREDICT-X.mq5</code>.</li><li>Attach EA to M5, M15, or M30 chart.</li></ol></div>
+MQL5/Indicators/PREDICT-X/Indicators/KeltnerChannel.mq5</pre>
+<ol>
+<li>Open MetaEditor and compile the <strong>three indicators first</strong>.</li>
+<li>Compile <code>PREDICT-X.mq5</code> (it pulls in the 18 include files automatically).</li>
+<li>In MT5, refresh the Navigator and attach the EA to an <strong>M5, M15 or M30</strong> chart.</li>
+<li>Enable Algo Trading in MT5 if you want the EA to place orders.</li>
+</ol>
+<p class="note">Supported timeframes are M5, M15 and M30. Any other timeframe still loads but falls back to the M15 preset and the panel shows an <em>unsupported TF</em> warning.</p>
+</div>
 
-<h2>3. Inputs</h2><table><tr><th>Input</th><th>Default</th><th>Meaning</th></tr>
-<tr><td>Enable Auto Trading</td><td>false</td><td>Master switch. False = signal/display only. True = EA can place/manage trades.</td></tr>
-<tr><td>Use Initial Stop Loss</td><td>false</td><td>If false, no broker-side SL at entry. Planned SL still used for lot/risk and later protection.</td></tr>
-<tr><td>Risk Per Trade (%)</td><td>1.0</td><td>Risk used for lot calculation.</td></tr>
-<tr><td>Trading Mode</td><td>Normal</td><td>Conservative = 0.5x risk, Normal = 1x, Aggressive = 1.5x.</td></tr>
-<tr><td>Auto-Adjust Settings</td><td>true</td><td>Timeframe preset plus regime adjustments. Dangerous regime still blocks.</td></tr>
-<tr><td>Daily Loss Limit (%)</td><td>2.0</td><td>Used only if Apply Daily Loss Limit is true.</td></tr>
-<tr><td>Apply Daily Loss Limit</td><td>false</td><td>If false, daily loss will not close/cancel/halt trades and panel shows DAILY LOSS: OFF.</td></tr>
-<tr><td>Show Panel</td><td>true</td><td>Show/hide panels.</td></tr>
-<tr><td>Show Prediction Projection Lines</td><td>false</td><td>Draw Entry→TP1 and Entry→TP2 projection lines.</td></tr>
-<tr><td>Trading Sessions</td><td>All</td><td>Session filter.</td></tr>
-<tr><td>Enable Online AI Scoring Enhancement</td><td>true</td><td>AI learns from chart-symbol signal outcomes and can add bonus points after enough samples.</td></tr>
-<tr><td>Use Candlestick Confirmation</td><td>true</td><td>Adds small candle-pattern bonus and blocks market entry on opposite candle warning.</td></tr>
-<tr><td>Push / Popup / Sound Alerts</td><td>false</td><td>Alert delivery channels.</td></tr>
-<tr><td>Signal Alerts</td><td>false</td><td>Alert on new signal.</td></tr>
-<tr><td>Trade Opened/Closed Alerts</td><td>true</td><td>Trade lifecycle event category. Needs at least one alert channel enabled.</td></tr>
-<tr><td>TP1/TP2/SL Alerts</td><td>true</td><td>TP/SL event category. Needs at least one alert channel enabled.</td></tr></table>
+<h2>4. First Run — What to Expect</h2>
+<div class="card">
+<p>The first time you attach the EA to a symbol and timeframe, Aladin has no memory yet. It builds one:</p>
+<ol>
+<li>The EA rehearses its own scoring over the <strong>last 3,000 closed bars</strong> of that chart, in chunks of <strong>200 bars per pass</strong> so the terminal never freezes.</li>
+<li>While rehearsing, the panel shows <code>Aladin learning — building history (x% / N setups)</code>.</li>
+<li>From then on, every live signal and its real outcome is appended to the same memory file, so the bank keeps growing.</li>
+</ol>
+<p>Until <strong>30 resolved outcomes</strong> exist, Aladin is <span class="warn">show-only</span>: it displays its read of the market but changes nothing. After that, Phase B actions arm automatically.</p>
+<p class="small">Rehearsal is per symbol + timeframe. Attaching to a new chart builds a separate memory file for it.</p>
+</div>
 
-<h2>4. Main Scoring</h2><div class="card"><p>The EA uses these layers:</p><ul><li>Smart Money / SMC</li><li>Trend and Momentum</li><li>VWAP / Keltner / Session / Spread</li><li>Higher Timeframe Confluence</li><li>Markov Chain</li><li>Online AI Confirmation</li><li>Candlestick Confirmation bonus</li></ul><p>Final score is capped at 100.</p></div>
+<h2>5. Inputs</h2>
+<div class="card">
+<h3>Master switches</h3>
+<table>
+<tr><th>Input</th><th>Default</th><th>Meaning</th></tr>
+<tr><td>Enable Auto Trading</td><td><span class="bad">false</span></td><td>Master switch. <strong>false</strong> = signals and display only, no new orders. <strong>true</strong> = the EA may place and manage trades.</td></tr>
+<tr><td>Enable Aladin <span class="tag">new</span></td><td><span class="ok">true</span></td><td>One switch for the whole memory bank: rehearsal, FUTURE VIEW, and Phase B trade actions. <strong>false</strong> = classic PREDICT-X, byte-for-byte the old behaviour.</td></tr>
+<tr><td>Enable Trade Protection</td><td><span class="ok">true</span></td><td>Tick-level protection of an open position: early locks, breakeven, trailing, staircase. <strong>Not</strong> linked to Auto Trading.</td></tr>
+<tr><td>Use Initial Stop Loss</td><td><span class="bad">false</span></td><td>If false, no broker-side SL is sent at entry. The planned SL is still used for lot sizing and for every later protection move.</td></tr>
+</table>
 
-<h2>5. Candlestick Confirmation</h2><div class="card"><p>Candlestick confirmation is a small support layer only:</p><ul><li>BUY support: bullish engulfing, hammer/pin, morning star, strong bullish close.</li><li>SELL support: bearish engulfing, shooting star/pin, evening star, strong bearish close.</li><li>Near VWAP/Order Block can add a small bonus.</li><li>Maximum bonus: <code>+5</code>.</li><li>It never subtracts points and never creates trades alone.</li><li>Opposite candle warning can block market entry.</li></ul></div>
+<h3>Risk &amp; sizing</h3>
+<table>
+<tr><th>Input</th><th>Default</th><th>Meaning</th></tr>
+<tr><td>Risk Per Trade (%)</td><td>1.0</td><td>Account % risked per trade, used for lot calculation.</td></tr>
+<tr><td>Trading Mode</td><td>Normal</td><td>Conservative = 0.5× risk, Normal = 1×, Aggressive = 1.5×.</td></tr>
+<tr><td>Auto-Adjust Settings</td><td>true</td><td>Applies the timeframe preset plus regime adjustments. A dangerous regime still blocks signals.</td></tr>
+<tr><td>Daily Loss Limit (%)</td><td>2.0</td><td>Used only when Apply Daily Loss Limit is true.</td></tr>
+<tr><td>Apply Daily Loss Limit</td><td><span class="bad">false</span></td><td>If false, the daily loss limit never closes, cancels or halts anything.</td></tr>
+</table>
 
-<h2>6. Entry Logic</h2><div class="card"><ul><li>Very Strong = market.</li><li>Strong + momentum/not extended = market.</li><li>Strong extended = market only if ADX very strong and spread low; otherwise limit.</li><li>Medium near 69 + strong momentum = market.</li><li>Normal Medium = VWAP / Order Block limit.</li></ul><p>Pending setup refreshes every closed bar. Stale/invalid orders are updated or cancelled.</p></div>
+<h3>Staircase protection <span class="tag">new</span></h3>
+<table>
+<tr><th>Input</th><th>Default</th><th>Meaning</th></tr>
+<tr><td>Protect Trigger (% of risk)</td><td>1.0</td><td>Arms the staircase once floating profit reaches this share of the trade's risk.</td></tr>
+<tr><td>Protect Giveback (%)</td><td>30.0</td><td>Inside each profit bucket, closes when price gives back this share of the bucket's favourable move from its peak.</td></tr>
+</table>
 
-<h2>7. Broker-Aware TP/SL</h2><div class="card"><p>The EA now adjusts TP/SL to satisfy broker stop/freeze distance rules.</p><ul><li>BUY TP must be above valid broker distance.</li><li>BUY SL must be below valid broker distance if initial SL is used.</li><li>SELL TP must be below valid broker distance.</li><li>SELL SL must be above valid broker distance if initial SL is used.</li><li>If adjustment makes R:R too poor, the setup is rejected.</li></ul></div>
+<h3>Display, sessions and analysis</h3>
+<table>
+<tr><th>Input</th><th>Default</th><th>Meaning</th></tr>
+<tr><td>Show Panel</td><td>true</td><td>Show or hide both on-chart panels.</td></tr>
+<tr><td>Show Prediction Projection Lines</td><td>false</td><td>Draws Entry → TP1 and Entry → TP2 projection lines on the chart.</td></tr>
+<tr><td>Trading Sessions</td><td>All</td><td>Session filter (Asia / London / New York / All).</td></tr>
+<tr><td>Enable Online AI Scoring Enhancement</td><td>true</td><td>Adds a learned bonus after enough measured outcomes on that symbol.</td></tr>
+<tr><td>Use Candlestick Confirmation</td><td>true</td><td>Small candle-pattern bonus; can block a market entry on an opposite-candle warning.</td></tr>
+<tr><td>Active Trade Prediction Monitor</td><td>true</td><td>Keeps re-checking the prediction after entry, every closed bar.</td></tr>
+</table>
 
-<h2>8. Trade Management</h2><div class="card"><h3>Before TP1</h3><ul><li>1/3 to TP1: SL to breakeven/spread buffer.</li><li>2/3 to TP1: SL locks 1/3 profit.</li><li>90% to TP1: SL locks 2/3 profit.</li><li>EA tracks best favorable price before TP1 so fast moves are not missed.</li></ul><h3>At TP1</h3><ul><li>Closes 50% if broker volume allows.</li><li>Attempts breakeven, but SL never moves backward.</li></ul><h3>After TP1</h3><ul><li>If price reaches halfway from TP1 to TP2, SL locks to TP1.</li><li>Then 30% giveback trail protects remaining profit.</li><li>SuperTrend/ATR/profit-lock trailing also manages the runner.</li></ul></div>
+<h3>Alerts</h3>
+<table>
+<tr><th>Input</th><th>Default</th><th>Meaning</th></tr>
+<tr><td>Push / Popup / Sound Alerts</td><td>false</td><td>Delivery channels. At least one must be on for any alert to reach you.</td></tr>
+<tr><td>Signal Alerts</td><td>false</td><td>Alert when a new signal appears. Suppressed when Aladin refuses the setup.</td></tr>
+<tr><td>Trade Opened/Closed Alerts</td><td>true</td><td>Trade lifecycle category. Needs a delivery channel enabled.</td></tr>
+<tr><td>TP1/TP2/SL Alerts</td><td>true</td><td>Take-profit and stop category. Needs a delivery channel enabled.</td></tr>
+</table>
+</div>
 
-<h2>9. Active Prediction Monitor</h2><div class="card"><p>After entry, the EA keeps checking the prediction every closed bar.</p><ul><li>Moderate weakness = tighten only.</li><li>No trade / heavy weakness / opposite signal = close only if profit is above broker-cost buffer.</li><li>Never closes a negative trade only because prediction changed.</li></ul></div>
+<h2>6. Scoring and Signal Tiers</h2>
+<div class="card">
+<p>Every closed bar is scored by six layers plus a candle bonus, capped at 100:</p>
+<ul>
+<li><strong>Layer 1 — Smart Money / SMC:</strong> order blocks and structure.</li>
+<li><strong>Layer 2 — Trend and momentum:</strong> SuperTrend, ADX, momentum continuation.</li>
+<li><strong>Layer 3 — Value:</strong> VWAP, Keltner, session, spread.</li>
+<li><strong>Layer 4 — Higher-timeframe confluence.</strong></li>
+<li><strong>Layer 5 — Markov chain</strong> state transitions.</li>
+<li><strong>Layer 6 — Online AI</strong> confirmation.</li>
+<li><strong>Candlestick confirmation</strong> bonus (max +5).</li>
+</ul>
+<table>
+<tr><th>Score</th><th>Tier</th><th>Typical entry</th></tr>
+<tr><td>85 – 100</td><td>VERY STRONG</td><td>Market</td></tr>
+<tr><td>70 – 84</td><td>STRONG</td><td>Market if momentum is healthy; limit if extended</td></tr>
+<tr><td>55 – 69</td><td>MEDIUM</td><td>VWAP / order-block limit</td></tr>
+<tr><td>below 55</td><td>WEAK / NO TRADE</td><td>No trade</td></tr>
+</table>
+<p class="small">The minimum score is 55 by default, and 60 on M5. A score below the minimum never becomes a trade, no matter what the memory bank says.</p>
+</div>
 
-<h2>10. Online AI</h2><div class="card"><ul><li>Less than 20 evaluated signals = learning mode, +0.</li><li>After 20 samples, AI may add +5 or +10 if it agrees.</li><li>AI never subtracts and never trades alone.</li><li>AI is chart-symbol based and persisted with MT5 Global Variables.</li></ul></div>
+<h2>7. Aladin Memory Bank <span class="tag">new</span></h2>
+<div class="card">
+<h3>How it works</h3>
+<ol>
+<li><strong>Rehearsal.</strong> On first run the EA replays its own scoring over the last 3,000 closed bars and records how each simulated setup would have ended (SL, TP1, TP2, breakeven, or timeout), including the worst drawdown before the result.</li>
+<li><strong>Live logging.</strong> Every real signal, its planned entry / SL / TP1 / TP2, and its actual outcome are appended to the same bank, forever.</li>
+<li><strong>Lookup.</strong> On each new signal the EA finds the <strong>50 most similar</strong> past setups (same 12-feature profile the Online AI uses, same direction) and reports their win rate, TP1 rate, and typical dip in ATR.</li>
+</ol>
+<p>Memory lives in one plain CSV per symbol and timeframe:</p>
+<pre>MQL5/Files/PREDICTX-MEM_&lt;SYMBOL&gt;_&lt;TIMEFRAME&gt;.csv
+e.g. MQL5/Files/PREDICTX-MEM_XAUUSD_M15.csv</pre>
+<p class="small">Deleting this file simply makes Aladin rehearse again from scratch. Nothing else in the EA is affected.</p>
 
-<h2>11. Panels</h2><div class="grid"><div class="card"><h3>Main Panel</h3><p>Regime, total score, signal, scoring layers, market context, signal state.</p></div><div class="card"><h3>Setup / Order Manager</h3><p>Shows when setup/order/trade exists. Displays entry, SL, TP1, TP2, breakeven, lot, risk/reward, current P/L, early lock, post-TP1, trailing, and last action.</p></div></div>
+<h3>The FUTURE VIEW panel block</h3>
+<p>Shows the verdict for the current bar, for example:</p>
+<pre>Aladin active — similar 50 | win 68% | TP1 81% | dip 0.6 ATR.
+History OK — no change needed.</pre>
+<p>Followed by numbered step lines covering memory, lookup, refuse, SL/TP, resize and entry. Status words:</p>
+<table>
+<tr><th>Status</th><th>Meaning</th></tr>
+<tr><td><span class="small">OFF</span></td><td>Master switch off — classic PREDICT-X only.</td></tr>
+<tr><td><span class="bad">FAILED</span></td><td>Memory file unavailable. The EA silently falls back to the classic path and says so.</td></tr>
+<tr><td><span class="warn">LEARNING</span></td><td>Rehearsing, or fewer than 30 resolved outcomes. Display only — no actions.</td></tr>
+<tr><td><span class="ok">ACTIVE</span></td><td>Enough history. Phase B actions may change SL/TP, lot, entry, or refuse the setup.</td></tr>
+</table>
 
-<h2>12. Safety Notes</h2><div class="card"><ul><li class="warn">If Use Initial Stop Loss = false, there is no broker-side SL before protection logic moves SL.</li><li class="warn">Test on demo first.</li><li>Manual orders are not managed unless they use PREDICT-X magic number.</li><li>If trade opened on one timeframe, another timeframe cannot signal-close it.</li></ul></div>
+<h3>Phase B actions</h3>
+<table>
+<tr><th>Action</th><th>Triggers when</th><th>What it does</th></tr>
+<tr><td><strong>Smart SL / TP</strong></td><td>Enough similar setups</td><td>Widens SL to cover the measured dip + a 0.15 ATR pad, clamped between 0.80 and 3.20 ATR. Rebuilds TP1 at 0.90R–1.10R (by TP1 hit rate) and TP2 at 1.60R–2.20R (by tier).</td></tr>
+<tr><td><strong>REFUSE</strong></td><td>Win rate below 45% on 30+ similar</td><td>Cancels the signal and any pending order. Nothing is opened.</td></tr>
+<tr><td><strong>RESIZE</strong></td><td>Lukewarm history (win rate under 55%)</td><td>Halves the lot. Never increases it.</td></tr>
+<tr><td><strong>GO (stronger entry)</strong></td><td>Win rate 62%+ and TP1 rate 70%+</td><td>Converts a limit entry to market, and adds 2 extra bars to the pending expiry.</td></tr>
+</table>
+<p class="note">Hard limits: memory can never invent a trade, never raise the lot above your risk plan, and never override the minimum score. Every action is printed to the Experts log with its reason.</p>
+</div>
 
-<p class="small">Latest PREDICT-X guide. Keep this file with the EA package when moving to another PC.</p>
+<h2>8. Entry Logic</h2>
+<div class="card">
+<ul>
+<li><strong>VERY STRONG</strong> → market entry.</li>
+<li><strong>STRONG</strong> with healthy momentum and not extended → market entry.</li>
+<li><strong>STRONG but extended</strong> → market only if ADX is very strong and spread is low; otherwise a limit.</li>
+<li><strong>MEDIUM</strong> near the upper end with strong momentum → market.</li>
+<li><strong>MEDIUM</strong> normally → VWAP or order-block limit.</li>
+</ul>
+<p>The pending setup is refreshed on every closed bar; stale or invalid orders are updated or cancelled. A pending signal is also cancelled instantly if SuperTrend flips against it.</p>
+<p>With Aladin active, a GO verdict can promote a limit to market and extend the pending expiry by two bars.</p>
+</div>
+
+<h2>9. Broker-Aware TP / SL</h2>
+<div class="card">
+<p>Levels are adjusted to satisfy your broker's stop and freeze distance rules:</p>
+<ul>
+<li>BUY TP must sit above the minimum broker distance; SELL TP below it.</li>
+<li>BUY SL must sit below it, SELL SL above it — when an initial SL is used.</li>
+<li>If the adjustment wrecks the reward-to-risk ratio, the setup is rejected outright.</li>
+</ul>
+</div>
+
+<h2>10. Trade Management</h2>
+<div class="card">
+<h3>Before TP1 — early profit locks</h3>
+<ul>
+<li><strong>1/3 of the way to TP1</strong> → stop moves to breakeven plus a spread buffer.</li>
+<li><strong>2/3 of the way</strong> → stop locks in the 1/3 profit level.</li>
+<li><strong>90% of the way</strong> → stop locks in the 2/3 profit level.</li>
+</ul>
+<p class="small">The EA tracks the best favourable price reached before TP1, so a fast spike through a level is never missed after a pullback. The stop never moves backwards.</p>
+
+<h3>At TP1</h3>
+<ul>
+<li>Closes <strong>50%</strong> of the position, if the broker's minimum volume allows a partial close.</li>
+<li>Moves the stop to breakeven on the remainder.</li>
+</ul>
+
+<h3>After TP1 — running the remainder</h3>
+<ul>
+<li>Once price travels <strong>halfway from TP1 to TP2</strong>, the stop locks to TP1. TP1 becomes the floor.</li>
+<li>A giveback trail then protects the remaining profit.</li>
+<li>SuperTrend, ATR and profit-lock trailing continue to manage the runner.</li>
+</ul>
+</div>
+
+<h2>11. Staircase Protection <span class="tag">new</span></h2>
+<div class="card">
+<p>This is the layer that banks profit on the way to TP1 instead of waiting for the stop to be hit.</p>
+<ol>
+<li>Once floating profit reaches <strong>1.0 × the trade's risk</strong> (Protect Trigger), the staircase arms.</li>
+<li>The distance from entry to TP1 is split into buckets: <strong>entry → 1/3 → 2/3 → 90% → TP1</strong>.</li>
+<li>Each time price enters a higher bucket, the stop is raised to that bucket's floor.</li>
+<li>Inside a bucket, the position closes early if price either <strong>touches the bucket floor</strong> or <strong>gives back 30%</strong> (Protect Giveback) of the bucket's favourable move from its peak.</li>
+</ol>
+<p class="ok">Safety: this layer never closes a losing trade. If floating P/L is not positive, it does nothing and leaves the exit to the normal stop or early-lock logic.</p>
+<p class="small">The bucket floors are the same 1/3, 2/3 and 90% levels used by the early profit locks, so the two systems agree rather than fight each other. After TP1 the separate post-TP1 trail takes over.</p>
+</div>
+
+<h2>12. Active Prediction Monitor</h2>
+<div class="card">
+<p>After entry, the EA keeps re-checking the prediction on every closed bar:</p>
+<ul>
+<li><strong>Moderate weakness</strong> → tightens the stop only.</li>
+<li><strong>No-trade / heavy weakness / opposite signal</strong> → closes, but only if profit is above the broker-cost buffer.</li>
+<li><span class="ok">Never closes a losing trade just because the prediction changed.</span></li>
+</ul>
+</div>
+
+<h2>13. Online AI</h2>
+<div class="card">
+<ul>
+<li>Fewer than <strong>20</strong> evaluated signals → learning mode, bonus +0. The panel counts up (<code>ONLINE AI LEARNING 7/20</code>).</li>
+<li>After 20 outcomes, if the AI's direction agrees with the signal it adds <strong>+5</strong> at 55–70% confidence, or <strong>+10</strong> above 70%.</li>
+<li>Below 55% confidence it contributes nothing — the panel shows <code>CAUTION</code> or <code>NEUTRAL</code>. Nothing is ever deducted.</li>
+<li>It <strong>never subtracts</strong> points and <strong>never trades alone</strong>.</li>
+<li>The model is per chart symbol and is persisted in MT5 Global Variables.</li>
+</ul>
+<p class="small">This is a separate, simpler model from the Aladin memory bank. Both can be on at the same time — Aladin is turned off with Enable Aladin, the AI with Enable Online AI Scoring Enhancement.</p>
+</div>
+
+<h2>14. Candlestick Confirmation</h2>
+<div class="card">
+<p>A small support layer only:</p>
+<ul>
+<li><strong>BUY:</strong> bullish engulfing, hammer / pin bar, morning star, strong bullish close.</li>
+<li><strong>SELL:</strong> bearish engulfing, shooting star / pin bar, evening star, strong bearish close.</li>
+<li>Being near VWAP or an order block can add a small bonus.</li>
+<li><strong>Maximum bonus +5.</strong> It never subtracts and never creates a trade by itself.</li>
+<li>An opposite-candle warning can block a market entry.</li>
+</ul>
+</div>
+
+<h2>15. The Panels</h2>
+<div class="grid">
+<div class="card">
+<h3>Main (left) panel</h3>
+<p>Standard top-to-bottom layout: regime, total score, <strong>SIGNAL</strong> with a plain BUY / SELL / HOLD direction, the six scoring layers, market context, signal state, the <strong>ALADIN / FUTURE VIEW</strong> block with its step lines, a plain-language summary, and the last action taken with its time.</p>
+<p class="small">The real score stays visible even while a gate (spread, session, regime, or Aladin) is blocking the trade, so you can always see what the engine actually thinks.</p>
+</div>
+<div class="card">
+<h3>Order manager (right panel)</h3>
+<p>Appears when a setup, order or trade exists. Shows entry, SL, TP1, TP2, breakeven, lot, reward-to-risk, live P/L, early lock state, post-TP1 state, trailing state, and the last action.</p>
+</div>
+</div>
+<p class="small">Both panels are removed cleanly when you detach the EA. Chart arrows and projection lines are drawn only for valid, tradeable signals.</p>
+
+<h2>16. Alerts</h2>
+<div class="card">
+<p>Alerts are two-part: a <strong>category</strong> (what happened) and a <strong>channel</strong> (how it reaches you). Both must be on.</p>
+<table>
+<tr><th>Category</th><th>Default</th><th>Fires on</th></tr>
+<tr><td>Signal Alerts</td><td>off</td><td>A new Medium-or-better signal. Suppressed when Aladin refuses.</td></tr>
+<tr><td>Trade Opened/Closed</td><td>on</td><td>Order placed, filled, or position closed.</td></tr>
+<tr><td>TP1 / TP2 / SL</td><td>on</td><td>TP1 partial close, TP2, stop out, protection close.</td></tr>
+</table>
+<p>Channels — <strong>Push, Popup, Sound</strong> — are all <span class="bad">off</span> by default. Turn on at least one, otherwise no alert is delivered.</p>
+</div>
+
+<h2>17. Safety Notes</h2>
+<div class="card">
+<ul>
+<li class="warn">If Use Initial Stop Loss = <strong>false</strong>, there is no broker-side stop until the protection logic moves it. That is the default.</li>
+<li class="warn">Auto Trading is <strong>off</strong> by default. The EA will not place orders until you switch it on.</li>
+<li class="warn">Test on a demo account first.</li>
+<li>Manual orders are not managed unless they carry the PREDICT-X magic number <code>26070501</code>.</li>
+<li>A trade opened on one timeframe cannot be signalled closed by another timeframe.</li>
+<li>Aladin actions stay inside your risk plan: refuse and resize only ever reduce exposure, never increase it.</li>
+<li>If the memory file cannot be read, Aladin disables itself and the EA continues on the classic path. It will not guess.</li>
+</ul>
+</div>
+
+<h2>18. Troubleshooting</h2>
+<div class="card">
+<table>
+<tr><th>What you see</th><th>What it means</th></tr>
+<tr><td><code>Aladin learning — building history (x%)</code></td><td>First-run rehearsal in progress. Normal; it completes in chunks of 200 bars.</td></tr>
+<tr><td><code>Aladin learning — needs 30 resolved outcomes</code></td><td>Bank exists but is too small to act on. Display only until it reaches 30.</td></tr>
+<tr><td><code>Aladin active — no similar setups for this signal yet</code></td><td>Enough history overall, but nothing close to this bar. Classic path this bar.</td></tr>
+<tr><td><code>Aladin failed — using classic EA path</code></td><td>Memory file unreadable. Check <code>MQL5/Files</code> permissions. The EA keeps trading normally.</td></tr>
+<tr><td><code>REFUSED</code> in the FUTURE VIEW block</td><td>Win rate under 45% on 30+ similar setups. No order will be placed.</td></tr>
+<tr><td>Panel says <em>unsupported TF</em></td><td>Chart is not M5, M15 or M30. The M15 preset is being used.</td></tr>
+<tr><td>No alerts arriving</td><td>Enable at least one channel: Push, Popup or Sound.</td></tr>
+</table>
+</div>
+
+<p class="small">PREDICT-X v2.00 user guide. Keep this file with the EA package when moving to another PC. Trading involves risk; nothing in this guide is financial advice.</p>
+
 </div></body></html>
