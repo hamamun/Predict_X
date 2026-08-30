@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PREDICT-X User Guide</title>
+<style>
+  :root{--bg:#0f1115;--panel:#171b22;--panel2:#202632;--text:#e7e7e7;--muted:#b8c0cc;--cyan:#7fdcff;--green:#8df0a4;--red:#ff8e8e;--yellow:#ffd56a;--orange:#ffb36a;--line:#333b4a}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:Segoe UI,Arial,sans-serif;line-height:1.55;padding:28px}.wrap{max-width:1100px;margin:0 auto}h1{color:var(--cyan);font-size:34px;margin:0 0 6px}h2{color:var(--cyan);border-bottom:1px solid var(--line);padding-bottom:6px;margin-top:34px}h3{color:var(--yellow);margin-top:22px}.sub{color:var(--muted);font-size:16px;margin-bottom:20px}.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px;margin:16px 0;box-shadow:0 0 0 1px rgba(255,255,255,.02)}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:14px}code,pre{background:#0b0d12;color:#d8f7ff;border:1px solid #2b3340;border-radius:8px}code{padding:2px 6px}pre{padding:12px;overflow:auto}table{width:100%;border-collapse:collapse;margin:12px 0;background:var(--panel)}th,td{border:1px solid var(--line);padding:10px;text-align:left;vertical-align:top}th{background:var(--panel2);color:var(--cyan)}.ok{color:var(--green);font-weight:600}.warn{color:var(--orange);font-weight:600}.bad{color:var(--red);font-weight:600}.note{color:var(--yellow);font-weight:600}.small{font-size:13px;color:var(--muted)}
+</style>
+</head>
+<body><div class="wrap">
+<h1>PREDICT-X User Guide</h1>
+<div class="sub">Latest build guide — prediction, scoring, optional auto-trading, online AI, candlestick confirmation, and smart trade management.</div>
+
+<div class="card"><h2>1. What PREDICT-X Does</h2><p>PREDICT-X is a MetaTrader 5 Expert Advisor that analyzes closed candles, scores market conditions, predicts BUY/SELL/NO TRADE, and optionally places/manages trades.</p><p><span class="ok">Native MT5/MQL5 only.</span> <span class="ok">No martingale.</span> <span class="ok">No grid.</span> <span class="ok">Closed-bar signals only.</span></p></div>
+
+<h2>2. Installation</h2><div class="card"><pre>MQL5/Experts/PREDICT-X/PREDICT-X.mq5
+MQL5/Experts/PREDICT-X/Include/*.mqh
+MQL5/Indicators/PREDICT-X/Indicators/SuperTrend.mq5
+MQL5/Indicators/PREDICT-X/Indicators/TTMSqueeze.mq5
+MQL5/Indicators/PREDICT-X/Indicators/KeltnerChannel.mq5</pre><ol><li>Compile the three indicators first.</li><li>Compile <code>PREDICT-X.mq5</code>.</li><li>Attach EA to M5, M15, or M30 chart.</li></ol></div>
+
+<h2>3. Inputs</h2><table><tr><th>Input</th><th>Default</th><th>Meaning</th></tr>
+<tr><td>Enable Auto Trading</td><td>false</td><td>Master switch. False = signal/display only. True = EA can place/manage trades.</td></tr>
+<tr><td>Use Initial Stop Loss</td><td>false</td><td>If false, no broker-side SL at entry. Planned SL still used for lot/risk and later protection.</td></tr>
+<tr><td>Risk Per Trade (%)</td><td>1.0</td><td>Risk used for lot calculation.</td></tr>
+<tr><td>Trading Mode</td><td>Normal</td><td>Conservative = 0.5x risk, Normal = 1x, Aggressive = 1.5x.</td></tr>
+<tr><td>Auto-Adjust Settings</td><td>true</td><td>Timeframe preset plus regime adjustments. Dangerous regime still blocks.</td></tr>
+<tr><td>Daily Loss Limit (%)</td><td>2.0</td><td>Used only if Apply Daily Loss Limit is true.</td></tr>
+<tr><td>Apply Daily Loss Limit</td><td>false</td><td>If false, daily loss will not close/cancel/halt trades and panel shows DAILY LOSS: OFF.</td></tr>
+<tr><td>Show Panel</td><td>true</td><td>Show/hide panels.</td></tr>
+<tr><td>Show Prediction Projection Lines</td><td>false</td><td>Draw Entry→TP1 and Entry→TP2 projection lines.</td></tr>
+<tr><td>Trading Sessions</td><td>All</td><td>Session filter.</td></tr>
+<tr><td>Enable Online AI Scoring Enhancement</td><td>true</td><td>AI learns from chart-symbol signal outcomes and can add bonus points after enough samples.</td></tr>
+<tr><td>Use Candlestick Confirmation</td><td>true</td><td>Adds small candle-pattern bonus and blocks market entry on opposite candle warning.</td></tr>
+<tr><td>Push / Popup / Sound Alerts</td><td>false</td><td>Alert delivery channels.</td></tr>
+<tr><td>Signal Alerts</td><td>false</td><td>Alert on new signal.</td></tr>
+<tr><td>Trade Opened/Closed Alerts</td><td>true</td><td>Trade lifecycle event category. Needs at least one alert channel enabled.</td></tr>
+<tr><td>TP1/TP2/SL Alerts</td><td>true</td><td>TP/SL event category. Needs at least one alert channel enabled.</td></tr></table>
+
+<h2>4. Main Scoring</h2><div class="card"><p>The EA uses these layers:</p><ul><li>Smart Money / SMC</li><li>Trend and Momentum</li><li>VWAP / Keltner / Session / Spread</li><li>Higher Timeframe Confluence</li><li>Markov Chain</li><li>Online AI Confirmation</li><li>Candlestick Confirmation bonus</li></ul><p>Final score is capped at 100.</p></div>
+
+<h2>5. Candlestick Confirmation</h2><div class="card"><p>Candlestick confirmation is a small support layer only:</p><ul><li>BUY support: bullish engulfing, hammer/pin, morning star, strong bullish close.</li><li>SELL support: bearish engulfing, shooting star/pin, evening star, strong bearish close.</li><li>Near VWAP/Order Block can add a small bonus.</li><li>Maximum bonus: <code>+5</code>.</li><li>It never subtracts points and never creates trades alone.</li><li>Opposite candle warning can block market entry.</li></ul></div>
+
+<h2>6. Entry Logic</h2><div class="card"><ul><li>Very Strong = market.</li><li>Strong + momentum/not extended = market.</li><li>Strong extended = market only if ADX very strong and spread low; otherwise limit.</li><li>Medium near 69 + strong momentum = market.</li><li>Normal Medium = VWAP / Order Block limit.</li></ul><p>Pending setup refreshes every closed bar. Stale/invalid orders are updated or cancelled.</p></div>
+
+<h2>7. Broker-Aware TP/SL</h2><div class="card"><p>The EA now adjusts TP/SL to satisfy broker stop/freeze distance rules.</p><ul><li>BUY TP must be above valid broker distance.</li><li>BUY SL must be below valid broker distance if initial SL is used.</li><li>SELL TP must be below valid broker distance.</li><li>SELL SL must be above valid broker distance if initial SL is used.</li><li>If adjustment makes R:R too poor, the setup is rejected.</li></ul></div>
+
+<h2>8. Trade Management</h2><div class="card"><h3>Before TP1</h3><ul><li>1/3 to TP1: SL to breakeven/spread buffer.</li><li>2/3 to TP1: SL locks 1/3 profit.</li><li>90% to TP1: SL locks 2/3 profit.</li><li>EA tracks best favorable price before TP1 so fast moves are not missed.</li></ul><h3>At TP1</h3><ul><li>Closes 50% if broker volume allows.</li><li>Attempts breakeven, but SL never moves backward.</li></ul><h3>After TP1</h3><ul><li>If price reaches halfway from TP1 to TP2, SL locks to TP1.</li><li>Then 30% giveback trail protects remaining profit.</li><li>SuperTrend/ATR/profit-lock trailing also manages the runner.</li></ul></div>
+
+<h2>9. Active Prediction Monitor</h2><div class="card"><p>After entry, the EA keeps checking the prediction every closed bar.</p><ul><li>Moderate weakness = tighten only.</li><li>No trade / heavy weakness / opposite signal = close only if profit is above broker-cost buffer.</li><li>Never closes a negative trade only because prediction changed.</li></ul></div>
+
+<h2>10. Online AI</h2><div class="card"><ul><li>Less than 20 evaluated signals = learning mode, +0.</li><li>After 20 samples, AI may add +5 or +10 if it agrees.</li><li>AI never subtracts and never trades alone.</li><li>AI is chart-symbol based and persisted with MT5 Global Variables.</li></ul></div>
+
+<h2>11. Panels</h2><div class="grid"><div class="card"><h3>Main Panel</h3><p>Regime, total score, signal, scoring layers, market context, signal state.</p></div><div class="card"><h3>Setup / Order Manager</h3><p>Shows when setup/order/trade exists. Displays entry, SL, TP1, TP2, breakeven, lot, risk/reward, current P/L, early lock, post-TP1, trailing, and last action.</p></div></div>
+
+<h2>12. Safety Notes</h2><div class="card"><ul><li class="warn">If Use Initial Stop Loss = false, there is no broker-side SL before protection logic moves SL.</li><li class="warn">Test on demo first.</li><li>Manual orders are not managed unless they use PREDICT-X magic number.</li><li>If trade opened on one timeframe, another timeframe cannot signal-close it.</li></ul></div>
+
+<p class="small">Latest PREDICT-X guide. Keep this file with the EA package when moving to another PC.</p>
+</div></body></html>
