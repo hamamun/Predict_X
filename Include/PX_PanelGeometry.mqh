@@ -1,3 +1,4 @@
+// PREDICT-X v2.00  -  PX_PanelGeometry.mqh
 #ifndef __PX_PANEL_GEOMETRY_MQH__
 #define __PX_PANEL_GEOMETRY_MQH__
 

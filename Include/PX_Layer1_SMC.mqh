@@ -1,3 +1,4 @@
+// PREDICT-X v2.00  -  PX_Layer1_SMC.mqh
 #ifndef __PX_LAYER1_SMC_MQH__
 #define __PX_LAYER1_SMC_MQH__
 #include "PX_Scoring.mqh"

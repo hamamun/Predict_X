@@ -1,5 +1,5 @@
 #property copyright "PREDICT-X"
-#property version   "1.00"
+#property version   "2.00"
 #property indicator_chart_window
 #property indicator_buffers 4
 #property indicator_plots   2

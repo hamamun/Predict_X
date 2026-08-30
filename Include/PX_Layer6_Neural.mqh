@@ -1,3 +1,4 @@
+// PREDICT-X v2.00  -  PX_Layer6_Neural.mqh
 #ifndef __PX_LAYER6_NEURAL_MQH__
 #define __PX_LAYER6_NEURAL_MQH__
 #include "PX_Scoring.mqh"

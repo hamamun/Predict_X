@@ -1,3 +1,4 @@
+// PREDICT-X v2.00  -  PX_MarketRegime.mqh
 #ifndef __PX_MARKETREGIME_MQH__
 #define __PX_MARKETREGIME_MQH__
 #include "PX_AutoPreset.mqh"

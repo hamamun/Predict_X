@@ -1,3 +1,4 @@
+// PREDICT-X v2.00  -  PX_CandleConfirm.mqh
 #ifndef __PX_CANDLECONFIRM_MQH__
 #define __PX_CANDLECONFIRM_MQH__
 

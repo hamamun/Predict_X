@@ -1,6 +1,6 @@
 //+------------------------------------------------------------------+
 //|                                                  PXM_Rehearse.mqh |
-//| ALADDIN rehearsal engine (builds memory bank from past bars).             |
+//| ALADDIN rehearsal engine (builds memory bank from past bars).  [PREDICT-X v2.00]             |
 //|                                                                  |
 //| Runs the scoring math over MT5's OWN past closed bars to build   |
 //| the memory bank's history. Layer1 (SMC) and Layer5 (Markov) in   |
@@ -430,7 +430,9 @@ bool PXM_RhScoreBar(const int b,const int hST,const int hRSI,const int hADX,cons
    s.features[10]=(double)s.stDir; s.features[11]=sqz;
 
    // --- layer 6 (online AI) replayed with the CURRENT model weights.
-   // Approximation is deliberate: Phase-3 AI value measurement is the scorecard's job.
+   // Approximation is deliberate: layer 6 is replayed with the model's CURRENT
+   // weights, so these rows estimate the AI's present-day effect rather than
+   // the weights that were live on each past bar.
    s.l6=0;
    if(InpEnableAIEnhancement && g_px3AI.samples>=20)
    {
