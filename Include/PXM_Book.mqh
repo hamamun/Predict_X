@@ -2,18 +2,17 @@
 //|                                                     PXM_Book.mqh |
 //| ALADDIN memory bank + Phase B trade actions.  [PREDICT-X v2.00]                     |
 //|                                                                  |
-//| One plain CSV file per symbol+TF in MQL5\Files:                  |
-//|   row kinds: 1=rehearsal result (PXM_Rehearse),                  |
-//|              2=live signal (logged by PX_FutureViewCheck),       |
-//|              3=outcome backfill update for a live row.           |
-//| Grown live: every signal + setup is appended; real trade        |
-//| outcomes are backfilled from deal history or OHLC projection.    |
+//| One persistent SQLite database in Terminal Common Files stores   |
+//| all symbols/timeframes, isolated by symbol+TF+feature version.   |
+//| row sources: 1=rehearsal result, 2=live signal/outcome.          |
+//| Grown live: every signal + setup is inserted; real trade         |
+//| outcomes update that row from deal history/OHLC projection.      |
 //| k-NN lookup on the SAME 12-feature vector the online AI uses    |
 //| returns: win%, TP1%, typical dip (MAE in ATR), time-to-result.   |
 //|                                                                  |
 //| Master switch: InpEnableAladin. When ON and memory is ready,    |
 //| Phase B may: smarter SL/TP, refuse weak history, resize lot,    |
-//| stronger entry (GO). File/lookup failure falls back to classic  |
+//| stronger entry (GO). Database/lookup failure falls back to classic  |
 //| PREDICT-X behaviour and the panel shows the failure clearly.    |
 //| Uses its own GV keys (PREDICTX.MEM.*) - no collision with       |
 //| PREDICTX.<magic>.* (TradeManager) or PREDICTX.ONLINEAI.* keys.  |
@@ -32,9 +31,13 @@
 #include "PX_TradeManager.mqh"
 
 //--- single-switch internal standards (no user inputs for these)
-#define PXM_NCOLS              30
-#define PXM_MAX_ROWS           200000
-#define PXM_SCAN_CAP           60000
+#define PXM_DB_SCHEMA_VERSION  2
+#define PXM_FEATURE_VERSION    2
+#define PXM_DB_RETENTION_DAYS  180
+#define PXM_DB_MAX_ROWS_PER_TF 20000
+#define PXM_DB_CLEAN_INTERVAL_SEC 86400
+#define PXM_MAX_ROWS           PXM_DB_MAX_ROWS_PER_TF
+#define PXM_SCAN_CAP           20000
 #define PXM_SIM_BARS           40
 #define PXM_REHEARSE_BARS      3000
 #define PXM_REHEARSE_PER_PASS  200
@@ -55,6 +58,8 @@
 #define PXM_RESULT_TP2         3
 #define PXM_RESULT_BE          4
 #define PXM_RESULT_TMO         5
+#define PXM_DB_SOURCE_REHEARSAL 1
+#define PXM_DB_SOURCE_LIVE      2
 
 //--- action / panel mode for the Aladin section
 enum PXM_Mode
@@ -66,10 +71,10 @@ enum PXM_Mode
    PXM_MODE_ACTIVE=4
 };
 
-//--- in-memory row (matches the CSV layout one-to-one)
+//--- in-memory row (mirrors one SQLite aladin_memory row for current symbol+TF)
 struct PXM_Row
 {
-   int      kind;      // 1 rehearsal, 2 live signal, 3 outcome update
+   int      kind;      // 1 rehearsal, 2 live signal/outcome row
    datetime time;      // signal closed-bar time
    int      dir;       // 1 buy, -1 sell
    int      score;     // total score (0-100)
@@ -104,7 +109,7 @@ struct PXM_Action
    bool   smartSLTP;        // SL/TP rewritten from measured memory
    bool   goMarket;         // stronger entry: limit -> market allowed
    bool   goExpiry;         // stronger entry: extra pending bars
-   bool   fellBack;         // file/lookup failed -> classic EA path
+   bool   fellBack;         // database/lookup failed -> classic EA path
    double lotFactor;        // extra lot multiplier (<=1.0; never raises risk)
    int    expiryBonus;      // extra bars added to pending expiry
    string stepMemory;       // panel step lines
@@ -134,8 +139,8 @@ struct PXM_LivePend
 
 PXM_Row    g_pxmRows[];
 int        g_pxmCount=0, g_pxmResolved=0, g_pxmRhRowsLoaded=0;
-int        g_pxmFile=-1;
-string     g_pxmFileDisplay="";
+int        g_pxmFile=-1;             // Aladin SQLite database handle (kept as g_pxmFile for existing guard code)
+datetime   g_pxmLastPrune=0;
 PXM_View   g_pxmView;
 PXM_Action g_pxmAct;
 PXM_LivePend g_pxmPend;
@@ -171,7 +176,7 @@ double PXM_AutoSpreadPoints(const double fallbackPts=0.0)
    return 0.0;
 }
 
-// True when Aladin may act on trading (ON + file OK + enough similar ready samples).
+// True when Aladin may act on trading (ON + database OK + enough similar fresh samples).
 bool PXM_CanAct()
 {
    return (InpEnableAladin && g_pxmFile>=0 && g_pxmView.ready && g_pxmView.n>=PXM_MIN_SAMPLES && !g_pxmAct.fellBack);
@@ -192,7 +197,14 @@ string PXM_FutureViewStatus(const double atr,const double entry,const double sl)
       return "Aladin learning - building history ("+IntegerToString(pct)+"% / "+IntegerToString(g_pxmCount)+" setups). Actions wait until ready.";
    }
    if(g_pxmResolved<PXM_MIN_SAMPLES)
+   {
+      bool done=PXM_RehearsalDoneDB();
+      if(g_pxmAct.fellBack)
+         return (g_pxmAct.reason!=""?g_pxmAct.reason:"Aladin failed - using classic EA path.");
+      if(!g_pxmRhActive && done)
+         return "Aladin rehearsal complete - bank small ("+IntegerToString(g_pxmResolved)+"/"+IntegerToString(PXM_MIN_SAMPLES)+" resolved). Actions wait for more live outcomes.";
       return "Aladin learning - needs "+IntegerToString(PXM_MIN_SAMPLES)+" resolved outcomes before actions arm. Bank: "+IntegerToString(g_pxmResolved)+".";
+   }
    if(g_pxmView.n<=0)
       return "Aladin ready - no similar setups for this signal yet (classic path this bar).";
 
@@ -233,7 +245,7 @@ string PXM_AladinPanelBody()
 }
 
 //+------------------------------------------------------------------+
-//| Keys / file names                                                 |
+//| Keys / database names                                             |
 //+------------------------------------------------------------------+
 string PXM_GV(const string suffix)
 {
@@ -242,23 +254,15 @@ string PXM_GV(const string suffix)
 
 string PXM_FileName()
 {
-   return "PREDICTX-MEM_"+_Symbol+"_"+PX_TFToString(_Period)+".csv";
+   // One persistent SQLite database for all live symbols/timeframes. Tester uses
+   // a separate file so optimization/backtest runs cannot pollute live learning.
+   string suffix=((bool)MQLInfoInteger(MQL_TESTER)?"_TESTER":"");
+   return "PREDICTX_ALADIN_MEMORY"+suffix+".sqlite";
 }
 
-//--- single source of truth for the CSV header (written on create and rewrite)
-string PXM_HeaderLine()
-{
-   return "PXMV1,PXM Aladin memory bank. kind,time,dir,score,tier,l1..l6,candle,er,atrRatio,adx,rsi,stDir,sqz,atrPts,spreadPts,entry,sl,tp1,tp2,result,win,tp1hit,maeATR,pnlR,barsRes";
-}
-
-//+------------------------------------------------------------------+
-//| Pending-tracker persistence.                                      |
-//| A terminal global variable holds exactly ONE double - there is no |
-//| array overload of GlobalVariableSet/Get - so the live tracker is  |
-//| stored as one scalar GV per field (same pattern as PX_TradeManager|
-//| ). All keys stay under PREDICTX.MEM.<sym>.<tf>.pend.* so nothing  |
-//| collides with the TradeManager or OnlineAI keys.                  |
-//+------------------------------------------------------------------+
+// Pending live-outcome tracker persistence remains in terminal global variables
+// because it is small scalar state for the currently open/just-closed trade. The
+// actual learning bank is the SQLite database below.
 double PXM_PendGet(const string suffix)
 {
    string key=PXM_GV(suffix);
@@ -268,171 +272,471 @@ double PXM_PendGet(const string suffix)
 
 void PXM_PendDelGV()
 {
-   // every tracker field lives under "...<tf>.pend." - one prefix sweep clears
-   // them all and touches nothing else (rehearseDone and other keys are safe).
    GlobalVariablesDeleteAll(PXM_GV("pend."));
 }
 
-//+------------------------------------------------------------------+
-//| Number (de)serialization helpers - strings avoid CSV precision    |
-//| surprises and keep empty cells meaningful for update rows.        |
-//+------------------------------------------------------------------+
+//--- SQL number serialization helpers.  Explicit strings avoid locale/precision
+//--- surprises when building SQLite statements.
 string PXM_FmtD(const double v)
 {
-   return DoubleToString(v,8);
+   return DoubleToString(v,12);
 }
 string PXM_FmtI(const long v)
 {
    return IntegerToString(v);
 }
-double PXM_GetD(const string &fields[],const int col)
-{
-   if(col<0 || col>=PXM_NCOLS) return 0.0;
-   if(fields[col]=="") return 0.0;
-   return StringToDouble(fields[col]);
-}
-int PXM_GetI(const string &fields[],const int col)
-{
-   return (int)MathRound(PXM_GetD(fields,col));
-}
-double PXM_GetDDefault(const string &fields[],const int col,const double def)
-{
-   if(col<0 || col>=PXM_NCOLS) return def;
-   if(fields[col]=="") return def;
-   return StringToDouble(fields[col]);
-}
-
-string PXM_RowLine(const int kind,const datetime time,const int dir,const int score,const int tier,
-                   const int l1,const int l2,const int l3,const int l4,const int l5,const int l6,const int candle,
-                   const double er,const double atrRatio,const double adx,const double rsi,const double stDir,const double sqz,
-                   const double atrPts,const double spreadPts,
-                   const double entry,const double sl,const double tp1,const double tp2,
-                   const int result,const int win,const int tp1hit,
-                   const double maeATR,const double pnlR,const int barsRes)
-{
-   string line=PXM_FmtI(kind);
-   line+=","+PXM_FmtI((long)time);
-   line+=","+PXM_FmtI(dir);
-   line+=","+PXM_FmtI(score);
-   line+=","+PXM_FmtI(tier);
-   line+=","+PXM_FmtI(l1)+","+PXM_FmtI(l2)+","+PXM_FmtI(l3)+","+PXM_FmtI(l4)+","+PXM_FmtI(l5)+","+PXM_FmtI(l6)+","+PXM_FmtI(candle);
-   line+=","+PXM_FmtD(er)+","+PXM_FmtD(atrRatio)+","+PXM_FmtD(adx)+","+PXM_FmtD(rsi)+","+PXM_FmtD(stDir)+","+PXM_FmtD(sqz);
-   line+=","+PXM_FmtD(atrPts)+","+PXM_FmtD(spreadPts);
-   line+=","+PXM_FmtD(entry)+","+PXM_FmtD(sl)+","+PXM_FmtD(tp1)+","+PXM_FmtD(tp2);
-   line+=","+PXM_FmtI(result)+","+PXM_FmtI(win)+","+PXM_FmtI(tp1hit);
-   line+=","+PXM_FmtD(maeATR)+","+PXM_FmtD(pnlR)+","+PXM_FmtI(barsRes);
-   return line;
-}
 
 //+------------------------------------------------------------------+
-//| File open / load / append / rewrite                               |
+//| SQLite storage / load / append / update                           |
 //+------------------------------------------------------------------+
-void PXM_WriteLine(const string line)
+string PXM_SQLText(string text)
 {
-   if(g_pxmFile<0) return;
-   FileSeek(g_pxmFile,0,SEEK_END);
-   if(FileWriteString(g_pxmFile,line+"\n")<=0)
-   {
-      g_pxmErr++;
-      if(g_pxmErr<=3) Print("PREDICT-X MEM: file write failed err=",GetLastError());
-   }
+   StringReplace(text,"'","''");
+   return "'"+text+"'";
 }
 
-void PXM_ParseInto(string &fields[])
+datetime PXM_Now()
 {
-   PXM_Row r;
-   r.kind=PXM_GetI(fields,0);
-   r.time=(datetime)PXM_GetD(fields,1);
-   r.dir=PXM_GetI(fields,2);
-   r.score=PXM_GetI(fields,3);
-   r.tier=PXM_GetI(fields,4);
-   r.l1=PXM_GetI(fields,5);   r.l2=PXM_GetI(fields,6);   r.l3=PXM_GetI(fields,7);
-   r.l4=PXM_GetI(fields,8);   r.l5=PXM_GetI(fields,9);   r.l6=PXM_GetI(fields,10);
-   r.candle=PXM_GetI(fields,11);
-   r.er=PXM_GetD(fields,12);  r.atrRatio=PXM_GetD(fields,13); r.adx=PXM_GetD(fields,14);
-   r.rsi=PXM_GetD(fields,15); r.stDir=PXM_GetD(fields,16);    r.sqz=PXM_GetD(fields,17);
-   r.atrPts=PXM_GetD(fields,18); r.spreadPts=PXM_GetD(fields,19);
-   r.entry=PXM_GetD(fields,20);  r.sl=PXM_GetD(fields,21);
-   r.tp1=PXM_GetD(fields,22);    r.tp2=PXM_GetD(fields,23);
-   r.result=PXM_GetI(fields,24); r.win=PXM_GetI(fields,25);  r.tp1hit=PXM_GetI(fields,26);
-   r.maeATR=PXM_GetD(fields,27); r.pnlR=PXM_GetD(fields,28); r.barsRes=PXM_GetI(fields,29);
-   if(r.kind==3)
+   // Use market/chart time as the freshness reference. In Strategy Tester this
+   // avoids comparing old test data against the computer's real calendar date.
+   datetime chartNow=iTime(_Symbol,_Period,0);
+   if((bool)MQLInfoInteger(MQL_TESTER) && chartNow>0) return chartNow;
+   datetime now=TimeCurrent();
+   if(now<=0 && chartNow>0) now=chartNow;
+   if(now<=0) now=TimeLocal();
+   return now;
+}
+
+datetime PXM_CutoffTime()
+{
+   return (datetime)((long)PXM_Now()-(long)PXM_DB_RETENTION_DAYS*(long)86400);
+}
+
+string PXM_SQLSymbol(){ return PXM_SQLText(_Symbol); }
+string PXM_SQLTF(){ return PXM_SQLText(PX_TFToString(_Period)); }
+
+bool PXM_DBExec(const string sql,const string context="")
+{
+   if(g_pxmFile<0) return false;
+   ResetLastError();
+   if(DatabaseExecute(g_pxmFile,sql)) return true;
+   int err=GetLastError();
+   g_pxmErr++;
+   if(g_pxmErr<=5)
+      Print("PREDICT-X ALADIN DB: ",(context!=""?context:"SQL")," failed err=",err," sql=",sql);
+   return false;
+}
+
+void PXM_MarkDBFailure(const string reason)
+{
+   g_pxmAct.fellBack=true;
+   g_pxmAct.mode=PXM_MODE_FAILED;
+   g_pxmAct.headline="Aladin failed";
+   g_pxmAct.reason=reason;
+   g_pxmAct.stepMemory=reason;
+   g_pxmRhActive=false;
+}
+
+bool PXM_EnsureDB()
+{
+   if(g_pxmFile<0) return false;
+   // Harmless pragmas; do not fail the whole memory bank if a broker build
+   // rejects either one.
+   DatabaseExecute(g_pxmFile,"PRAGMA journal_mode=WAL");
+   DatabaseExecute(g_pxmFile,"PRAGMA synchronous=NORMAL");
+   DatabaseExecute(g_pxmFile,"PRAGMA busy_timeout=3000");
+
+   bool ok=true;
+   ok=(PXM_DBExec(
+      "CREATE TABLE IF NOT EXISTS aladin_memory ("
+      "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+      "schema_ver INTEGER NOT NULL,"
+      "feature_ver INTEGER NOT NULL,"
+      "source INTEGER NOT NULL,"
+      "symbol TEXT NOT NULL,"
+      "timeframe TEXT NOT NULL,"
+      "sig_time INTEGER NOT NULL,"
+      "dir INTEGER NOT NULL,"
+      "score INTEGER NOT NULL,"
+      "tier INTEGER NOT NULL,"
+      "l1 INTEGER NOT NULL,"
+      "l2 INTEGER NOT NULL,"
+      "l3 INTEGER NOT NULL,"
+      "l4 INTEGER NOT NULL,"
+      "l5 INTEGER NOT NULL,"
+      "l6 INTEGER NOT NULL,"
+      "candle INTEGER NOT NULL,"
+      "er REAL NOT NULL,"
+      "atr_ratio REAL NOT NULL,"
+      "adx REAL NOT NULL,"
+      "rsi REAL NOT NULL,"
+      "st_dir REAL NOT NULL,"
+      "sqz REAL NOT NULL,"
+      "atr_pts REAL NOT NULL,"
+      "spread_pts REAL NOT NULL,"
+      "entry REAL NOT NULL,"
+      "sl REAL NOT NULL,"
+      "tp1 REAL NOT NULL,"
+      "tp2 REAL NOT NULL,"
+      "result INTEGER NOT NULL,"
+      "win INTEGER NOT NULL,"
+      "tp1_hit INTEGER NOT NULL,"
+      "mae_atr REAL NOT NULL,"
+      "pnl_r REAL NOT NULL,"
+      "bars_res INTEGER NOT NULL,"
+      "created_at INTEGER NOT NULL,"
+      "updated_at INTEGER NOT NULL,"
+      "UNIQUE(symbol,timeframe,feature_ver,source,sig_time)"
+      ")","create memory table") && ok);
+   ok=(PXM_DBExec("CREATE INDEX IF NOT EXISTS idx_aladin_lookup ON aladin_memory(symbol,timeframe,feature_ver,dir,result,sig_time DESC)","create lookup index") && ok);
+   ok=(PXM_DBExec("CREATE INDEX IF NOT EXISTS idx_aladin_roll ON aladin_memory(symbol,timeframe,feature_ver,sig_time DESC,id DESC)","create rolling index") && ok);
+   ok=(PXM_DBExec(
+      "CREATE TABLE IF NOT EXISTS aladin_meta ("
+      "symbol TEXT NOT NULL,"
+      "timeframe TEXT NOT NULL,"
+      "feature_ver INTEGER NOT NULL,"
+      "meta_key TEXT NOT NULL,"
+      "value_int INTEGER NOT NULL,"
+      "updated_at INTEGER NOT NULL,"
+      "PRIMARY KEY(symbol,timeframe,feature_ver,meta_key)"
+      ")","create meta table") && ok);
+   return ok;
+}
+
+bool PXM_BeginDBTransaction()
+{
+   if(g_pxmFile<0) return false;
+   ResetLastError();
+   return DatabaseTransactionBegin(g_pxmFile);
+}
+
+bool PXM_CommitDBTransaction()
+{
+   if(g_pxmFile<0) return false;
+   ResetLastError();
+   return DatabaseTransactionCommit(g_pxmFile);
+}
+
+bool PXM_RollbackDBTransaction()
+{
+   if(g_pxmFile<0) return false;
+   ResetLastError();
+   return DatabaseTransactionRollback(g_pxmFile);
+}
+
+bool PXM_PruneDB(const bool force=false)
+{
+   if(g_pxmFile<0) return false;
+   datetime now=PXM_Now();
+   if(!force && g_pxmLastPrune>0 && (long)(now-g_pxmLastPrune)<PXM_DB_CLEAN_INTERVAL_SEC)
+      return true;
+
+   string sym=PXM_SQLSymbol();
+   string tf=PXM_SQLTF();
+   string fv=PXM_FmtI(PXM_FEATURE_VERSION);
+   string sv=PXM_FmtI(PXM_DB_SCHEMA_VERSION);
+   string cutoff=PXM_FmtI((long)PXM_CutoffTime());
+   string nowText=PXM_FmtI((long)now);
+   string maxRows=PXM_FmtI(PXM_DB_MAX_ROWS_PER_TF);
+
+   bool txn=PXM_BeginDBTransaction();
+   bool ok=true;
+   // Never use stale/incompatible rows.  They are removed when possible and,
+   // more importantly, all load/lookup queries filter them out even if deletion
+   // fails for any reason.
+   ok=(PXM_DBExec("DELETE FROM aladin_memory WHERE schema_ver<>"+sv+" OR feature_ver<>"+fv,"prune incompatible rows") && ok);
+   ok=(PXM_DBExec("DELETE FROM aladin_memory WHERE source NOT IN ("+PXM_FmtI(PXM_DB_SOURCE_REHEARSAL)+","+PXM_FmtI(PXM_DB_SOURCE_LIVE)+")","prune unknown-source rows") && ok);
+   ok=(PXM_DBExec("DELETE FROM aladin_memory WHERE sig_time<"+cutoff,"prune stale rows") && ok);
+   ok=(PXM_DBExec("DELETE FROM aladin_memory WHERE symbol="+sym+" AND timeframe="+tf+" AND sig_time>"+nowText,"prune future rows") && ok);
+   ok=(PXM_DBExec(
+      "DELETE FROM aladin_memory WHERE symbol="+sym+" AND timeframe="+tf+" AND feature_ver="+fv+
+      " AND id NOT IN (SELECT id FROM (SELECT id FROM aladin_memory WHERE symbol="+sym+
+      " AND timeframe="+tf+" AND feature_ver="+fv+" ORDER BY sig_time DESC,id DESC LIMIT "+maxRows+"))",
+      "prune rolling rows") && ok);
+   ok=(PXM_DBExec("DELETE FROM aladin_meta WHERE feature_ver<>"+fv+" OR updated_at<"+cutoff,"prune stale meta") && ok);
+
+   if(txn)
    {
-      // outcome backfill: merge onto the newest live row with the same bar time
-      for(int i=g_pxmCount-1;i>=0;i--)
+      if(ok)
       {
-         if(g_pxmRows[i].kind==2 && g_pxmRows[i].time==r.time)
-         {
-            bool wasRes=(g_pxmRows[i].result>=PXM_RESULT_SL && g_pxmRows[i].result<=PXM_RESULT_BE);
-            g_pxmRows[i].entry=r.entry;    g_pxmRows[i].sl=r.sl;
-            g_pxmRows[i].tp1=r.tp1;        g_pxmRows[i].tp2=r.tp2;
-            g_pxmRows[i].result=r.result;  g_pxmRows[i].win=r.win;
-            g_pxmRows[i].tp1hit=r.tp1hit;  g_pxmRows[i].maeATR=r.maeATR;
-            g_pxmRows[i].pnlR=r.pnlR;      g_pxmRows[i].barsRes=r.barsRes;
-            bool nowRes=(r.result>=PXM_RESULT_SL && r.result<=PXM_RESULT_BE);
-            if(!wasRes && nowRes) g_pxmResolved++;
-            if(wasRes && !nowRes) g_pxmResolved--;
-            return;
-         }
+         if(!PXM_CommitDBTransaction()) ok=false;
       }
-      return;
+      else PXM_RollbackDBTransaction();
    }
-   if(r.kind!=1 && r.kind!=2) return;
-   if(g_pxmCount>=PXM_MAX_ROWS) return; // trimmed in rehearsal; live rows still rare
-   ArrayResize(g_pxmRows,g_pxmCount+1);
+   if(ok) g_pxmLastPrune=now;
+   return ok;
+}
+
+void PXM_AddLoadedRow(const PXM_Row &r)
+{
+   if(r.kind!=PXM_DB_SOURCE_REHEARSAL && r.kind!=PXM_DB_SOURCE_LIVE) return;
+   if(g_pxmCount>=PXM_MAX_ROWS) return;
+   ArrayResize(g_pxmRows,g_pxmCount+1,4096);
    g_pxmRows[g_pxmCount]=r;
    g_pxmCount++;
+   if(r.kind==PXM_DB_SOURCE_REHEARSAL) g_pxmRhRowsLoaded++;
    if(r.result>=PXM_RESULT_SL && r.result<=PXM_RESULT_BE) g_pxmResolved++;
 }
 
-void PXM_ParseLine(const string line)
+void PXM_LoadDBRow(const int q)
 {
-   if(StringLen(line)<3) return;
-   if(StringFind(line,"PXMV1")==0) return; // header comment line
-   string fields[];
-   int n=StringSplit(line,',',fields);
-   if(n<PXM_NCOLS) return;
-   if(!(fields[0]=="1" || fields[0]=="2" || fields[0]=="3")) return;
-   PXM_ParseInto(fields);
+   PXM_Row r;
+   int iv=0;
+   long lv=0;
+   double dv=0.0;
+   bool ok=true;
+
+   ok=(ok && DatabaseColumnInteger(q,0,iv));  r.kind=iv;
+   ok=(ok && DatabaseColumnLong(q,1,lv));     r.time=(datetime)lv;
+   ok=(ok && DatabaseColumnInteger(q,2,iv));  r.dir=iv;
+   ok=(ok && DatabaseColumnInteger(q,3,iv));  r.score=iv;
+   ok=(ok && DatabaseColumnInteger(q,4,iv));  r.tier=iv;
+   ok=(ok && DatabaseColumnInteger(q,5,iv));  r.l1=iv;
+   ok=(ok && DatabaseColumnInteger(q,6,iv));  r.l2=iv;
+   ok=(ok && DatabaseColumnInteger(q,7,iv));  r.l3=iv;
+   ok=(ok && DatabaseColumnInteger(q,8,iv));  r.l4=iv;
+   ok=(ok && DatabaseColumnInteger(q,9,iv));  r.l5=iv;
+   ok=(ok && DatabaseColumnInteger(q,10,iv)); r.l6=iv;
+   ok=(ok && DatabaseColumnInteger(q,11,iv)); r.candle=iv;
+   ok=(ok && DatabaseColumnDouble(q,12,dv));  r.er=dv;
+   ok=(ok && DatabaseColumnDouble(q,13,dv));  r.atrRatio=dv;
+   ok=(ok && DatabaseColumnDouble(q,14,dv));  r.adx=dv;
+   ok=(ok && DatabaseColumnDouble(q,15,dv));  r.rsi=dv;
+   ok=(ok && DatabaseColumnDouble(q,16,dv));  r.stDir=dv;
+   ok=(ok && DatabaseColumnDouble(q,17,dv));  r.sqz=dv;
+   ok=(ok && DatabaseColumnDouble(q,18,dv));  r.atrPts=dv;
+   ok=(ok && DatabaseColumnDouble(q,19,dv));  r.spreadPts=dv;
+   ok=(ok && DatabaseColumnDouble(q,20,dv));  r.entry=dv;
+   ok=(ok && DatabaseColumnDouble(q,21,dv));  r.sl=dv;
+   ok=(ok && DatabaseColumnDouble(q,22,dv));  r.tp1=dv;
+   ok=(ok && DatabaseColumnDouble(q,23,dv));  r.tp2=dv;
+   ok=(ok && DatabaseColumnInteger(q,24,iv)); r.result=iv;
+   ok=(ok && DatabaseColumnInteger(q,25,iv)); r.win=iv;
+   ok=(ok && DatabaseColumnInteger(q,26,iv)); r.tp1hit=iv;
+   ok=(ok && DatabaseColumnDouble(q,27,dv));  r.maeATR=dv;
+   ok=(ok && DatabaseColumnDouble(q,28,dv));  r.pnlR=dv;
+   ok=(ok && DatabaseColumnInteger(q,29,iv)); r.barsRes=iv;
+
+   if(ok) PXM_AddLoadedRow(r);
+}
+
+bool PXM_RehearsalDoneDB()
+{
+   if(g_pxmFile<0) return false;
+   string sql="SELECT value_int FROM aladin_meta WHERE symbol="+PXM_SQLSymbol()+
+              " AND timeframe="+PXM_SQLTF()+
+              " AND feature_ver="+PXM_FmtI(PXM_FEATURE_VERSION)+
+              " AND meta_key='rehearsal_done' AND updated_at>="+PXM_FmtI((long)PXM_CutoffTime())+
+              " LIMIT 1";
+   int q=DatabasePrepare(g_pxmFile,sql);
+   if(q<0)
+   {
+      g_pxmErr++;
+      if(g_pxmErr<=5) Print("PREDICT-X ALADIN DB: rehearsal meta prepare failed err=",GetLastError());
+      PXM_MarkDBFailure("Aladin database metadata read failed - classic EA path.");
+      return false;
+   }
+   bool done=false;
+   if(DatabaseRead(q))
+   {
+      int v=0;
+      if(DatabaseColumnInteger(q,0,v)) done=(v>0);
+   }
+   DatabaseFinalize(q);
+   return done;
+}
+
+void PXM_SetRehearsalDoneDB()
+{
+   if(g_pxmFile<0) return;
+   string sql="INSERT OR REPLACE INTO aladin_meta(symbol,timeframe,feature_ver,meta_key,value_int,updated_at) VALUES("+
+              PXM_SQLSymbol()+","+PXM_SQLTF()+","+PXM_FmtI(PXM_FEATURE_VERSION)+
+              ",'rehearsal_done',1,"+PXM_FmtI((long)PXM_Now())+")";
+   if(!PXM_DBExec(sql,"set rehearsal done"))
+   {
+      PXM_MarkDBFailure("Aladin database metadata write failed - classic EA path.");
+   }
+}
+
+bool PXM_InsertRowDB(const PXM_Row &r)
+{
+   if(g_pxmFile<0) return false;
+   if(r.kind!=PXM_DB_SOURCE_REHEARSAL && r.kind!=PXM_DB_SOURCE_LIVE) return false;
+   string now=PXM_FmtI((long)PXM_Now());
+   string sql="INSERT OR IGNORE INTO aladin_memory("
+      "schema_ver,feature_ver,source,symbol,timeframe,sig_time,dir,score,tier,"
+      "l1,l2,l3,l4,l5,l6,candle,er,atr_ratio,adx,rsi,st_dir,sqz,atr_pts,spread_pts,"
+      "entry,sl,tp1,tp2,result,win,tp1_hit,mae_atr,pnl_r,bars_res,created_at,updated_at) VALUES(";
+   sql+=PXM_FmtI(PXM_DB_SCHEMA_VERSION)+","+PXM_FmtI(PXM_FEATURE_VERSION)+","+PXM_FmtI(r.kind)+","+
+        PXM_SQLSymbol()+","+PXM_SQLTF()+","+PXM_FmtI((long)r.time)+","+PXM_FmtI(r.dir)+","+
+        PXM_FmtI(r.score)+","+PXM_FmtI(r.tier)+","+PXM_FmtI(r.l1)+","+PXM_FmtI(r.l2)+","+
+        PXM_FmtI(r.l3)+","+PXM_FmtI(r.l4)+","+PXM_FmtI(r.l5)+","+PXM_FmtI(r.l6)+","+
+        PXM_FmtI(r.candle)+","+PXM_FmtD(r.er)+","+PXM_FmtD(r.atrRatio)+","+PXM_FmtD(r.adx)+","+
+        PXM_FmtD(r.rsi)+","+PXM_FmtD(r.stDir)+","+PXM_FmtD(r.sqz)+","+PXM_FmtD(r.atrPts)+","+
+        PXM_FmtD(r.spreadPts)+","+PXM_FmtD(r.entry)+","+PXM_FmtD(r.sl)+","+PXM_FmtD(r.tp1)+","+
+        PXM_FmtD(r.tp2)+","+PXM_FmtI(r.result)+","+PXM_FmtI(r.win)+","+PXM_FmtI(r.tp1hit)+","+
+        PXM_FmtD(r.maeATR)+","+PXM_FmtD(r.pnlR)+","+PXM_FmtI(r.barsRes)+","+now+","+now+")";
+   return PXM_DBExec(sql,"insert memory row");
+}
+
+bool PXM_LiveRowExistsDB(const datetime time,const int dir)
+{
+   if(g_pxmFile<0) return false;
+   string sql="SELECT id FROM aladin_memory WHERE symbol="+PXM_SQLSymbol()+
+              " AND timeframe="+PXM_SQLTF()+
+              " AND schema_ver="+PXM_FmtI(PXM_DB_SCHEMA_VERSION)+
+              " AND feature_ver="+PXM_FmtI(PXM_FEATURE_VERSION)+
+              " AND source="+PXM_FmtI(PXM_DB_SOURCE_LIVE)+
+              " AND sig_time="+PXM_FmtI((long)time)+
+              " AND dir="+PXM_FmtI(dir)+
+              " AND sig_time>="+PXM_FmtI((long)PXM_CutoffTime())+
+              " AND sig_time<="+PXM_FmtI((long)PXM_Now())+
+              " LIMIT 1";
+   ResetLastError();
+   int q=DatabasePrepare(g_pxmFile,sql);
+   if(q<0)
+   {
+      g_pxmErr++;
+      if(g_pxmErr<=5) Print("PREDICT-X ALADIN DB: live-row check prepare failed err=",GetLastError());
+      return false;
+   }
+   bool found=DatabaseRead(q);
+   DatabaseFinalize(q);
+   return found;
+}
+
+bool PXM_UpdateLiveRowDB(const datetime time,const int dir,const double entry,const double sl,const double tp1,const double tp2,
+                         const int result,const int win,const int tp1hit,const double maeATR,const double pnlR,const int barsRes)
+{
+   if(g_pxmFile<0) return false;
+   if(!PXM_LiveRowExistsDB(time,dir)) return false;
+   string sql="UPDATE aladin_memory SET entry="+PXM_FmtD(entry)+
+              ",sl="+PXM_FmtD(sl)+
+              ",tp1="+PXM_FmtD(tp1)+
+              ",tp2="+PXM_FmtD(tp2)+
+              ",result="+PXM_FmtI(result)+
+              ",win="+PXM_FmtI(win)+
+              ",tp1_hit="+PXM_FmtI(tp1hit)+
+              ",mae_atr="+PXM_FmtD(maeATR)+
+              ",pnl_r="+PXM_FmtD(pnlR)+
+              ",bars_res="+PXM_FmtI(barsRes)+
+              ",updated_at="+PXM_FmtI((long)PXM_Now())+
+              " WHERE symbol="+PXM_SQLSymbol()+
+              " AND timeframe="+PXM_SQLTF()+
+              " AND schema_ver="+PXM_FmtI(PXM_DB_SCHEMA_VERSION)+
+              " AND feature_ver="+PXM_FmtI(PXM_FEATURE_VERSION)+
+              " AND source="+PXM_FmtI(PXM_DB_SOURCE_LIVE)+
+              " AND sig_time="+PXM_FmtI((long)time)+
+              " AND dir="+PXM_FmtI(dir);
+   return PXM_DBExec(sql,"update live outcome");
+}
+
+void PXM_RecountMemory()
+{
+   g_pxmResolved=0;
+   g_pxmRhRowsLoaded=0;
+   for(int i=0;i<g_pxmCount;i++)
+   {
+      if(g_pxmRows[i].kind==PXM_DB_SOURCE_REHEARSAL) g_pxmRhRowsLoaded++;
+      if(g_pxmRows[i].result>=PXM_RESULT_SL && g_pxmRows[i].result<=PXM_RESULT_BE) g_pxmResolved++;
+   }
+}
+
+void PXM_TrimMemoryIfNeeded()
+{
+   if(g_pxmCount<=PXM_MAX_ROWS) return;
+   int keep=PXM_MAX_ROWS;
+   int off=g_pxmCount-keep;
+   for(int i=0;i<keep;i++) g_pxmRows[i]=g_pxmRows[off+i];
+   ArrayResize(g_pxmRows,keep,4096);
+   g_pxmCount=keep;
+   PXM_RecountMemory();
+}
+
+void PXM_PruneMemoryStale()
+{
+   datetime cutoff=PXM_CutoffTime();
+   datetime now=PXM_Now();
+   int w=0;
+   for(int i=0;i<g_pxmCount;i++)
+   {
+      if(g_pxmRows[i].time<cutoff || g_pxmRows[i].time>now) continue;
+      if(g_pxmRows[i].kind!=PXM_DB_SOURCE_REHEARSAL && g_pxmRows[i].kind!=PXM_DB_SOURCE_LIVE) continue;
+      if(w!=i) g_pxmRows[w]=g_pxmRows[i];
+      w++;
+   }
+   if(w!=g_pxmCount)
+   {
+      ArrayResize(g_pxmRows,w,4096);
+      g_pxmCount=w;
+      PXM_RecountMemory();
+   }
 }
 
 void PXM_Load()
 {
    g_pxmCount=0; g_pxmResolved=0; g_pxmRhRowsLoaded=0;
    ArrayResize(g_pxmRows,0);
-   int h=FileOpen(PXM_FileName(),FILE_READ|FILE_TXT|FILE_SHARE_READ);
-   if(h>=0)
+   if(g_pxmFile>=0)
    {
-      while(!FileIsEnding(h))
+      if(!PXM_PruneDB(true))
       {
-         string line=FileReadString(h);
-         if(line=="") break;
-         PXM_ParseLine(line);
+         PXM_MarkDBFailure("Aladin database cleanup failed - classic EA path.");
+         return;
       }
-      FileClose(h);
+      string sql="SELECT source,sig_time,dir,score,tier,l1,l2,l3,l4,l5,l6,candle,"
+                 "er,atr_ratio,adx,rsi,st_dir,sqz,atr_pts,spread_pts,entry,sl,tp1,tp2,"
+                 "result,win,tp1_hit,mae_atr,pnl_r,bars_res FROM ("
+                 "SELECT * FROM aladin_memory WHERE symbol="+PXM_SQLSymbol()+
+                 " AND timeframe="+PXM_SQLTF()+
+                 " AND schema_ver="+PXM_FmtI(PXM_DB_SCHEMA_VERSION)+
+                 " AND feature_ver="+PXM_FmtI(PXM_FEATURE_VERSION)+
+                 " AND sig_time>="+PXM_FmtI((long)PXM_CutoffTime())+
+                 " AND sig_time<="+PXM_FmtI((long)PXM_Now())+
+                 " AND source IN ("+PXM_FmtI(PXM_DB_SOURCE_REHEARSAL)+","+PXM_FmtI(PXM_DB_SOURCE_LIVE)+")"
+                 " ORDER BY sig_time DESC,id DESC LIMIT "+PXM_FmtI(PXM_MAX_ROWS)+") ORDER BY sig_time ASC,id ASC";
+      int q=DatabasePrepare(g_pxmFile,sql);
+      if(q>=0)
+      {
+         while(DatabaseRead(q)) PXM_LoadDBRow(q);
+         DatabaseFinalize(q);
+      }
+      else
+      {
+         g_pxmErr++;
+         if(g_pxmErr<=5) Print("PREDICT-X ALADIN DB: load query prepare failed err=",GetLastError());
+         PXM_MarkDBFailure("Aladin database read failed - classic EA path.");
+         return;
+      }
    }
+
    g_pxmPendActive=false;
    if(GlobalVariableCheck(PXM_GV("pend.time")))
    {
       double t=PXM_PendGet("pend.time");
       if(t>0.0)
       {
-         g_pxmPend.time=(datetime)(long)t;
-         g_pxmPend.dir=(int)PXM_PendGet("pend.dir");
-         g_pxmPend.entry=PXM_PendGet("pend.entry");
-         g_pxmPend.sl=PXM_PendGet("pend.sl");
-         g_pxmPend.tp1=PXM_PendGet("pend.tp1");
-         g_pxmPend.tp2=PXM_PendGet("pend.tp2");
-         g_pxmPend.atr=PXM_PendGet("pend.atr");
-         g_pxmPend.openLots=PXM_PendGet("pend.openLots");
-         g_pxmPend.profitSum=PXM_PendGet("pend.profitSum");
-         g_pxmPend.tp1hit=(int)PXM_PendGet("pend.tp1hit");
-         g_pxmPend.exitPrice=PXM_PendGet("pend.exitPrice");
-         g_pxmPend.exitTime=(datetime)(long)PXM_PendGet("pend.exitTime");
-         g_pxmPend.isTP=(int)PXM_PendGet("pend.isTP");
-         g_pxmPend.method=(int)PXM_PendGet("pend.method");
-         g_pxmPend.filled=(int)PXM_PendGet("pend.filled");
-         g_pxmPendActive=true;
+         datetime pt=(datetime)(long)t;
+         if(pt>=PXM_CutoffTime() && pt<=PXM_Now())
+         {
+            g_pxmPend.time=pt;
+            g_pxmPend.dir=(int)PXM_PendGet("pend.dir");
+            g_pxmPend.entry=PXM_PendGet("pend.entry");
+            g_pxmPend.sl=PXM_PendGet("pend.sl");
+            g_pxmPend.tp1=PXM_PendGet("pend.tp1");
+            g_pxmPend.tp2=PXM_PendGet("pend.tp2");
+            g_pxmPend.atr=PXM_PendGet("pend.atr");
+            g_pxmPend.openLots=PXM_PendGet("pend.openLots");
+            g_pxmPend.profitSum=PXM_PendGet("pend.profitSum");
+            g_pxmPend.tp1hit=(int)PXM_PendGet("pend.tp1hit");
+            g_pxmPend.exitPrice=PXM_PendGet("pend.exitPrice");
+            g_pxmPend.exitTime=(datetime)(long)PXM_PendGet("pend.exitTime");
+            g_pxmPend.isTP=(int)PXM_PendGet("pend.isTP");
+            g_pxmPend.method=(int)PXM_PendGet("pend.method");
+            g_pxmPend.filled=(int)PXM_PendGet("pend.filled");
+            g_pxmPendActive=true;
+         }
+         else PXM_PendDelGV();
       }
    }
 }
@@ -457,50 +761,12 @@ void PXM_SavePendGV()
    GlobalVariableSet(PXM_GV("pend.filled"),    (double)g_pxmPend.filled);
 }
 
-bool PXM_RewriteFile()
-{
-   // MQL5 has no FileTruncate(). Opening with FILE_WRITE and WITHOUT FILE_READ
-   // recreates the file at zero length, which is the supported way to truncate.
-   // The live append handle must be closed first or the reopen can fail.
-   string name=PXM_FileName();
-   if(g_pxmFile>=0) { FileClose(g_pxmFile); g_pxmFile=-1; }
-   int h=FileOpen(name,FILE_WRITE|FILE_TXT|FILE_SHARE_READ|FILE_SHARE_WRITE);
-   if(h<0)
-   {
-      Print("PREDICT-X MEM: rewrite failed to open '",name,"' err=",GetLastError());
-      // try to restore the append handle so logging survives a failed rewrite
-      g_pxmFile=FileOpen(name,FILE_READ|FILE_WRITE|FILE_TXT|FILE_SHARE_READ|FILE_SHARE_WRITE);
-      if(g_pxmFile>=0) FileSeek(g_pxmFile,0,SEEK_END);
-      return false;
-   }
-   FileWriteString(h,PXM_HeaderLine()+"\n");
-   for(int i=0;i<g_pxmCount;i++)
-   {
-      PXM_Row r=g_pxmRows[i];
-      string line=PXM_RowLine(r.kind,r.time,r.dir,r.score,r.tier,r.l1,r.l2,r.l3,r.l4,r.l5,r.l6,r.candle,
-                              r.er,r.atrRatio,r.adx,r.rsi,r.stDir,r.sqz,r.atrPts,r.spreadPts,
-                              r.entry,r.sl,r.tp1,r.tp2,r.result,r.win,r.tp1hit,r.maeATR,r.pnlR,r.barsRes);
-      FileWriteString(h,line+"\n");
-   }
-   FileFlush(h);
-   FileClose(h);
-   // reopen read/write so PXM_WriteLine() can keep appending
-   g_pxmFile=FileOpen(name,FILE_READ|FILE_WRITE|FILE_TXT|FILE_SHARE_READ|FILE_SHARE_WRITE);
-   if(g_pxmFile<0)
-   {
-      Print("PREDICT-X MEM: rewrite done but reopen failed err=",GetLastError(),
-            " - memory logging disabled this session.");
-      return false;
-   }
-   FileSeek(g_pxmFile,0,SEEK_END);
-   return true;
-}
-
 void PXM_Init()
 {
    PXM_ResetView(g_pxmView);
    PXM_ResetAction(g_pxmAct);
    g_pxmErr=0;
+   g_pxmLastPrune=0;
    if(!InpEnableAladin)
    {
       g_pxmFile=-1;
@@ -510,98 +776,100 @@ void PXM_Init()
       return;
    }
    string name=PXM_FileName();
-   g_pxmFileDisplay=name;
-   if(!FileIsExist(name))
-   {
-      int h=FileOpen(name,FILE_READ|FILE_WRITE|FILE_TXT);
-      if(h>=0)
-      {
-         FileWriteString(h,PXM_HeaderLine()+"\n");
-         FileClose(h);
-      }
-   }
-   g_pxmFile=FileOpen(name,FILE_READ|FILE_WRITE|FILE_TXT|FILE_SHARE_READ|FILE_SHARE_WRITE);
+   g_pxmFile=DatabaseOpen(name,DATABASE_OPEN_READWRITE|DATABASE_OPEN_CREATE|DATABASE_OPEN_COMMON);
    if(g_pxmFile<0)
    {
       g_pxmAct.mode=PXM_MODE_FAILED;
       g_pxmAct.fellBack=true;
       g_pxmAct.headline="Aladin failed";
-      g_pxmAct.reason="Memory file unavailable - classic EA path (no Aladin actions).";
-      g_pxmAct.stepMemory="FAILED: cannot open "+name;
-      Print("PREDICT-X ALADIN: cannot open memory file '",name,"' err=",GetLastError()," - falling back to classic EA.");
+      g_pxmAct.reason="Aladin database unavailable - classic EA path (no Aladin actions).";
+      g_pxmAct.stepMemory="FAILED: cannot open database "+name;
+      Print("PREDICT-X ALADIN: cannot open database '",name,"' err=",GetLastError()," - falling back to classic EA.");
+      return;
+   }
+   if(!PXM_EnsureDB())
+   {
+      DatabaseClose(g_pxmFile);
+      g_pxmFile=-1;
+      g_pxmAct.mode=PXM_MODE_FAILED;
+      g_pxmAct.fellBack=true;
+      g_pxmAct.headline="Aladin failed";
+      g_pxmAct.reason="Aladin database schema unavailable - classic EA path (no Aladin actions).";
+      g_pxmAct.stepMemory="FAILED: cannot create/read database schema";
       return;
    }
    PXM_Load();
+   if(g_pxmAct.fellBack) return;
    g_pxmAct.mode=PXM_MODE_LEARNING;
    g_pxmAct.headline="Aladin learning";
-   g_pxmAct.stepMemory=StringFormat("Bank loaded: %d setups (%d resolved)",g_pxmCount,g_pxmResolved);
-   Print("PREDICT-X ALADIN: bank loaded: ",g_pxmCount," rows (",g_pxmResolved," resolved outcomes), file=",name);
+   g_pxmAct.stepMemory=StringFormat("DB loaded: %d fresh setups (%d resolved), database %s",g_pxmCount,g_pxmResolved,name);
+   Print("PREDICT-X ALADIN: database loaded: ",g_pxmCount," fresh rows (",g_pxmResolved,
+         " resolved outcomes), database=",name,". Strict same symbol/timeframe, feature v",PXM_FEATURE_VERSION,
+         ", retention ",PXM_DB_RETENTION_DAYS," days.");
 }
 
 void PXM_Cleanup()
 {
-   if(g_pxmFile>=0) { FileClose(g_pxmFile); g_pxmFile=-1; }
+   if(g_pxmFile>=0)
+   {
+      DatabaseClose(g_pxmFile);
+      g_pxmFile=-1;
+   }
 }
 
 //+------------------------------------------------------------------+
 //| Append a fully built row (used by PXM_Rehearse.mqh and live log) |
 //+------------------------------------------------------------------+
-void PXM_AppendRow(const PXM_Row &r)
+bool PXM_AppendRow(const PXM_Row &r)
 {
-   if(!InpEnableAladin) return;
-   if(g_pxmFile<0) return;
-   if(r.kind==2 || r.kind==1)
+   if(!InpEnableAladin) return false;
+   if(g_pxmFile<0) return false;
+   if(r.kind!=PXM_DB_SOURCE_REHEARSAL && r.kind!=PXM_DB_SOURCE_LIVE) return false;
+   if(r.time<PXM_CutoffTime() || r.time>PXM_Now()) return false; // never learn from stale/future history
+
+   // Strict dedupe in RAM; DB has the same UNIQUE constraint for restart safety.
+   for(int i=g_pxmCount-1;i>=0;i--)
+      if(g_pxmRows[i].kind==r.kind && g_pxmRows[i].time==r.time) return true;
+
+   if(!PXM_InsertRowDB(r))
    {
-      if(g_pxmCount>=PXM_MAX_ROWS)
-      {
-         // drop the oldest third, keeping the newest data and all live rows
-         int keep=(int)(PXM_MAX_ROWS*0.66);
-         PXM_Row trimmed[];
-         ArrayResize(trimmed,keep);
-         int off=g_pxmCount-keep;
-         for(int i=0;i<keep;i++) trimmed[i]=g_pxmRows[off+i];
-         ArrayResize(g_pxmRows,keep);
-         for(int i=0;i<keep;i++) g_pxmRows[i]=trimmed[i];
-         g_pxmCount=keep;
-         g_pxmResolved=0;
-         for(int i=0;i<g_pxmCount;i++)
-            if(g_pxmRows[i].result>=PXM_RESULT_SL && g_pxmRows[i].result<=PXM_RESULT_BE) g_pxmResolved++;
-         PXM_RewriteFile();
-         Print("PREDICT-X MEM: bank full - trimmed to ",g_pxmCount," rows (rewrite).");
-         if(r.kind==1) return; // never displace live data for more rehearsal data
-      }
-      // dedupe: same bar time and kind already stored -> skip
-      for(int i=g_pxmCount-1;i>=0 && i>g_pxmCount-5000;i--)
-      {
-         if(g_pxmRows[i].kind==r.kind && g_pxmRows[i].time==r.time) return;
-      }
+      // Do not keep acting from memory if persistence is failing.  The classic
+      // EA path is safer than an Aladin bank that cannot be updated on disk.
+      PXM_MarkDBFailure("Aladin database write failed - classic EA path.");
+      return false;
    }
-   ArrayResize(g_pxmRows,g_pxmCount+1);
+
+   ArrayResize(g_pxmRows,g_pxmCount+1,4096);
    g_pxmRows[g_pxmCount]=r;
    g_pxmCount++;
+   if(r.kind==PXM_DB_SOURCE_REHEARSAL) g_pxmRhRowsLoaded++;
    if(r.result>=PXM_RESULT_SL && r.result<=PXM_RESULT_BE) g_pxmResolved++;
-   string line=PXM_RowLine(r.kind,r.time,r.dir,r.score,r.tier,r.l1,r.l2,r.l3,r.l4,r.l5,r.l6,r.candle,
-                           r.er,r.atrRatio,r.adx,r.rsi,r.stDir,r.sqz,r.atrPts,r.spreadPts,
-                           r.entry,r.sl,r.tp1,r.tp2,r.result,r.win,r.tp1hit,r.maeATR,r.pnlR,r.barsRes);
-   PXM_WriteLine(line);
+   PXM_TrimMemoryIfNeeded();
+   if(!PXM_PruneDB(false))
+   {
+      PXM_MarkDBFailure("Aladin database cleanup failed - classic EA path.");
+      return false;
+   }
+   return true;
 }
 
 //+------------------------------------------------------------------+
-//| Append an outcome update for the newest live row with this time  |
+//| Persist an outcome update for the newest live row with this time |
 //+------------------------------------------------------------------+
-void PXM_AppendUpdate(const datetime time,const int dir,const double entry,const double sl,const double tp1,const double tp2,
+bool PXM_AppendUpdate(const datetime time,const int dir,const double entry,const double sl,const double tp1,const double tp2,
                       const int result,const int win,const int tp1hit,const double maeATR,const double pnlR,const int barsRes)
 {
-   if(g_pxmFile<0) return;
-   string line=PXM_FmtI(3)+","+PXM_FmtI((long)time)+","+PXM_FmtI(dir);
-   for(int c=3;c<20;c++) line+=",0";
-   line+=","+PXM_FmtD(entry)+","+PXM_FmtD(sl)+","+PXM_FmtD(tp1)+","+PXM_FmtD(tp2);
-   line+=","+PXM_FmtI(result)+","+PXM_FmtI(win)+","+PXM_FmtI(tp1hit);
-   line+=","+PXM_FmtD(maeATR)+","+PXM_FmtD(pnlR)+","+PXM_FmtI(barsRes);
-   PXM_WriteLine(line);
+   if(g_pxmFile<0) return false;
+   if(time<PXM_CutoffTime() || time>PXM_Now()) return false;
+   if(!PXM_UpdateLiveRowDB(time,dir,entry,sl,tp1,tp2,result,win,tp1hit,maeATR,pnlR,barsRes))
+   {
+      PXM_MarkDBFailure("Aladin database update failed - classic EA path.");
+      return false;
+   }
+
    for(int i=g_pxmCount-1;i>=0;i--)
    {
-      if(g_pxmRows[i].kind==2 && g_pxmRows[i].time==time)
+      if(g_pxmRows[i].kind==PXM_DB_SOURCE_LIVE && g_pxmRows[i].time==time && g_pxmRows[i].dir==dir)
       {
          bool wasRes=(g_pxmRows[i].result>=PXM_RESULT_SL && g_pxmRows[i].result<=PXM_RESULT_BE);
          g_pxmRows[i].entry=entry; g_pxmRows[i].sl=sl; g_pxmRows[i].tp1=tp1; g_pxmRows[i].tp2=tp2;
@@ -609,9 +877,16 @@ void PXM_AppendUpdate(const datetime time,const int dir,const double entry,const
          g_pxmRows[i].maeATR=maeATR; g_pxmRows[i].pnlR=pnlR; g_pxmRows[i].barsRes=barsRes;
          bool nowRes=(result>=PXM_RESULT_SL && result<=PXM_RESULT_BE);
          if(!wasRes && nowRes) g_pxmResolved++;
+         if(wasRes && !nowRes) g_pxmResolved--;
          break;
       }
    }
+   if(!PXM_PruneDB(false))
+   {
+      PXM_MarkDBFailure("Aladin database cleanup failed - classic EA path.");
+      return false;
+   }
+   return true;
 }
 
 //+------------------------------------------------------------------+
@@ -627,6 +902,46 @@ void PXM_FeatFromRow(const PXM_Row &r,double &x[])
    PX3_NormalizeFeatures(f,(PX_Direction)r.dir,x);
 }
 
+double PXM_Clamp01(const double v)
+{
+   if(v<0.0) return 0.0;
+   if(v>1.0) return 1.0;
+   return v;
+}
+
+double PXM_RowNormFeature(const PXM_Row &r,const int col,const int dir)
+{
+   if(col==0)  return PXM_Clamp01((double)MathMax(0,r.score-r.l6-r.candle)/100.0);
+   if(col==1)  return PXM_Clamp01((double)r.l1/25.0);
+   if(col==2)  return PXM_Clamp01((double)r.l2/25.0);
+   if(col==3)  return PXM_Clamp01((double)r.l3/20.0);
+   if(col==4)  return PXM_Clamp01((double)r.l4/15.0);
+   if(col==5)  return PXM_Clamp01((double)r.l5/15.0);
+   if(col==6)  return PXM_Clamp01(r.er);
+   if(col==7)  return PXM_Clamp01(r.atrRatio/2.0);
+   if(col==8)  return PXM_Clamp01(r.adx/50.0);
+   if(col==9)  return PXM_Clamp01(r.rsi/100.0);
+   if(col==10) return (dir==0?0.0:r.stDir*(double)dir);
+   if(col==11) return PXM_Clamp01(r.sqz);
+   return 0.0;
+}
+
+double PXM_RecencyWeight(const datetime sampleTime)
+{
+   // Fresh learning matters most.  Anything past PXM_DB_RETENTION_DAYS is not
+   // used at all; rows inside the window are still down-weighted as they age.
+   datetime now=PXM_Now();
+   if(sampleTime<=0 || sampleTime<PXM_CutoffTime() || sampleTime>now) return 0.0;
+   double ageDays=(double)((long)now-(long)sampleTime)/86400.0;
+   if(ageDays<=30.0) return 1.0;
+   double span=(double)PXM_DB_RETENTION_DAYS-30.0;
+   if(span<=1.0) return 0.50;
+   double fade=(ageDays-30.0)/span;
+   if(fade<0.0) fade=0.0;
+   if(fade>1.0) fade=1.0;
+   return 1.0-0.75*fade; // reaches 0.25 at the edge of the freshness window
+}
+
 void PXM_LookupKNN(const double &feat[],const int dir,const int k,PXM_View &v)
 {
    PXM_ResetView(v);
@@ -637,17 +952,18 @@ void PXM_LookupKNN(const double &feat[],const int dir,const int k,PXM_View &v)
    double d[]; int idx[];
    ArrayResize(d,k); ArrayResize(idx,k);
    int cnt=0;
+   datetime cutoff=PXM_CutoffTime();
+   datetime now=PXM_Now();
    int start=MathMax(0,g_pxmCount-PXM_SCAN_CAP);
    for(int i=start;i<g_pxmCount;i++)
    {
       if(g_pxmRows[i].dir!=dir) continue;
+      if(g_pxmRows[i].time<cutoff || g_pxmRows[i].time>now) continue;
       if(g_pxmRows[i].result<PXM_RESULT_SL || g_pxmRows[i].result>PXM_RESULT_BE) continue;
-      double xr[];
-      PXM_FeatFromRow(g_pxmRows[i],xr);
       double dd=0.0;
       for(int c=0;c<12;c++)
       {
-         double dx=xq[c]-xr[c];
+         double dx=xq[c]-PXM_RowNormFeature(g_pxmRows[i],c,dir);
          dd+=dx*dx;
       }
       if(cnt<k)
@@ -664,20 +980,24 @@ void PXM_LookupKNN(const double &feat[],const int dir,const int k,PXM_View &v)
       }
    }
    if(cnt<=0) return;
-   double sumWin=0.0,sumTp1=0.0,sumMae=0.0,sumBars=0.0;
+   double sumW=0.0,sumWin=0.0,sumTp1=0.0,sumMae=0.0,sumBars=0.0;
    for(int j=0;j<cnt;j++)
    {
       PXM_Row r=g_pxmRows[idx[j]];
-      sumWin+=(r.win>0?1.0:0.0);
-      sumTp1+=(r.tp1hit>0?1.0:0.0);
-      sumMae+=r.maeATR;
-      sumBars+=(double)r.barsRes;
+      double w=PXM_RecencyWeight(r.time);
+      if(w<=0.0) continue;
+      sumW+=w;
+      sumWin+=(r.win>0?w:0.0);
+      sumTp1+=(r.tp1hit>0?w:0.0);
+      sumMae+=r.maeATR*w;
+      sumBars+=(double)r.barsRes*w;
    }
+   if(sumW<=0.0) return;
    v.n=cnt;
-   v.winPct=sumWin/cnt*100.0;
-   v.tp1Pct=sumTp1/cnt*100.0;
-   v.maeATR=sumMae/cnt;
-   v.avgBars=sumBars/cnt;
+   v.winPct=sumWin/sumW*100.0;
+   v.tp1Pct=sumTp1/sumW*100.0;
+   v.maeATR=sumMae/sumW;
+   v.avgBars=sumBars/sumW;
    v.ready=(cnt>=PXM_MIN_SAMPLES);
 }
 
@@ -705,7 +1025,7 @@ void PXM_ScanMAE(const int dir,const double entry,const double atr,const datetim
    else      maeATR=MathMax(0.0,(ext-entry)/atr);
 }
 
-// resolve an unfilled/untracked live signal from OHLC projection (memory only)
+// resolve an unfilled/untracked live signal from OHLC projection (database memory)
 void PXM_ProjectOutcome(PXM_LivePend &p,double &maeATR,int &barsRes,int &result,double &pnlR)
 {
    maeATR=0.0; barsRes=0; result=PXM_RESULT_NONE; pnlR=0.0;
@@ -776,7 +1096,7 @@ void PXM_ProjectOutcome(PXM_LivePend &p,double &maeATR,int &barsRes,int &result,
 void PXM_LogLiveSignal(const PX_Lifecycle &lc,const PX_ScoreResult &sr,const PX_RegimeState &reg,const PX_ValueContext &vc,const PX_TrendContext &tc)
 {
    PXM_Row r;
-   r.kind=2; r.time=lc.signalTime; r.dir=(int)sr.dir;
+   r.kind=PXM_DB_SOURCE_LIVE; r.time=lc.signalTime; r.dir=(int)sr.dir;
    r.score=sr.total; r.tier=(int)sr.tier;
    r.l1=sr.layer1; r.l2=sr.layer2; r.l3=sr.layer3; r.l4=sr.layer4; r.l5=sr.layer5; r.l6=sr.layer6; r.candle=sr.candleBonus;
    r.er=reg.er; r.atrRatio=reg.atrRatio; r.adx=tc.adx; r.rsi=tc.rsi; r.stDir=(double)tc.stDir; r.sqz=tc.ttmSqueeze;
@@ -784,7 +1104,7 @@ void PXM_LogLiveSignal(const PX_Lifecycle &lc,const PX_ScoreResult &sr,const PX_
    r.spreadPts=PXM_AutoSpreadPoints(vc.avgSpreadPoints);
    r.entry=0.0; r.sl=0.0; r.tp1=0.0; r.tp2=0.0;
    r.result=PXM_RESULT_NONE; r.win=0; r.tp1hit=0; r.maeATR=0.0; r.pnlR=0.0; r.barsRes=0;
-   PXM_AppendRow(r);
+   if(!PXM_AppendRow(r)) return;
    // start the live outcome tracker (setup fields attach after PX_CalcTradeSetup)
    g_pxmPend.time=lc.signalTime; g_pxmPend.dir=(int)sr.dir;
    g_pxmPend.entry=0.0; g_pxmPend.sl=0.0; g_pxmPend.tp1=0.0; g_pxmPend.tp2=0.0;
@@ -793,7 +1113,7 @@ void PXM_LogLiveSignal(const PX_Lifecycle &lc,const PX_ScoreResult &sr,const PX_
    g_pxmPend.method=0; g_pxmPend.filled=0;
    g_pxmPendActive=true;
    PXM_SavePendGV();
-   Print("PREDICT-X MEM: logged live signal ",PX_DirectionText(sr.dir)," score ",sr.total," tier ",PX_TierText(sr.tier)," @ ",TimeToString(lc.signalTime,TIME_DATE|TIME_MINUTES));
+   Print("PREDICT-X ALADIN DB: logged live signal ",PX_DirectionText(sr.dir)," score ",sr.total," tier ",PX_TierText(sr.tier)," @ ",TimeToString(lc.signalTime,TIME_DATE|TIME_MINUTES));
 }
 
 void PXM_AttachSetup(const PX_TradeSetup &ts)
@@ -809,14 +1129,15 @@ void PXM_AttachSetup(const PX_TradeSetup &ts)
 
 void PXM_OnTradeOpened(const double fillPrice,const double volume)
 {
-   if(!g_pxmPendActive || g_pxmPend.entry>0.0) return; // track the first entry of the tracked signal only
+   if(!g_pxmPendActive || g_pxmPend.filled==1) return; // track the first real fill of the tracked signal only
    g_pxmPend.entry=fillPrice;
    g_pxmPend.filled=1;
    if(volume>0.0) g_pxmPend.openLots=volume;
    PXM_SavePendGV();
-   PXM_AppendUpdate(g_pxmPend.time,g_pxmPend.dir,g_pxmPend.entry,g_pxmPend.sl,g_pxmPend.tp1,g_pxmPend.tp2,
-                    PXM_RESULT_NONE,0,g_pxmPend.tp1hit,0.0,0.0,0);
-   Print("PREDICT-X MEM: live trade opened @ ",DoubleToString(fillPrice,_Digits));
+   if(!PXM_AppendUpdate(g_pxmPend.time,g_pxmPend.dir,g_pxmPend.entry,g_pxmPend.sl,g_pxmPend.tp1,g_pxmPend.tp2,
+                        PXM_RESULT_NONE,0,g_pxmPend.tp1hit,0.0,0.0,0))
+      return;
+   Print("PREDICT-X ALADIN DB: live trade opened @ ",DoubleToString(fillPrice,_Digits));
 }
 
 void PXM_OnTradePartialTP1(const double profitMoney)
@@ -825,7 +1146,7 @@ void PXM_OnTradePartialTP1(const double profitMoney)
    g_pxmPend.tp1hit=1;
    g_pxmPend.profitSum+=profitMoney;
    PXM_SavePendGV();
-   Print("PREDICT-X MEM: TP1 partial hit, profit $",DoubleToString(profitMoney,2)," backfilled to memory");
+   Print("PREDICT-X ALADIN DB: TP1 partial hit, profit $",DoubleToString(profitMoney,2)," recorded for outcome backfill");
 }
 
 void PXM_OnTradeClosed(const double profitMoney,const bool isTP)
@@ -847,9 +1168,10 @@ void PXM_OnTradeClosed(const double profitMoney,const bool isTP)
    else res=PXM_RESULT_SL;
    double maeATR=0.0; int bars=0;
    PXM_ScanMAE(g_pxmPend.dir,g_pxmPend.entry,g_pxmPend.atr,g_pxmPend.time,g_pxmPend.exitTime,maeATR,bars);
-   PXM_AppendUpdate(g_pxmPend.time,g_pxmPend.dir,g_pxmPend.entry,g_pxmPend.sl,g_pxmPend.tp1,g_pxmPend.tp2,
-                    res,win,g_pxmPend.tp1hit,maeATR,pnlR,bars);
-   Print("PREDICT-X MEM: live outcome backfilled: result=",res," win=",win," pnlR=",DoubleToString(pnlR,2),
+   if(!PXM_AppendUpdate(g_pxmPend.time,g_pxmPend.dir,g_pxmPend.entry,g_pxmPend.sl,g_pxmPend.tp1,g_pxmPend.tp2,
+                        res,win,g_pxmPend.tp1hit,maeATR,pnlR,bars))
+      return;
+   Print("PREDICT-X ALADIN DB: live outcome backfilled: result=",res," win=",win," pnlR=",DoubleToString(pnlR,2),
          " dip=",DoubleToString(maeATR,2)," ATR over ",bars," bars");
    g_pxmPendActive=false;
    PXM_SavePendGV();
@@ -871,7 +1193,7 @@ void PX_FutureViewCheck(const PX_Lifecycle &lc,const bool newSignal,const PX_Sco
       g_pxmAct.fellBack=true;
       g_pxmAct.mode=PXM_MODE_FAILED;
       g_pxmAct.headline="Aladin failed";
-      g_pxmAct.reason=(failReason!=""?failReason:"Memory unavailable - classic EA path.");
+      g_pxmAct.reason=(failReason!=""?failReason:"Aladin database unavailable - classic EA path.");
       g_pxmAct.stepMemory=g_pxmAct.reason;
       return;
    }
@@ -884,11 +1206,18 @@ void PX_FutureViewCheck(const PX_Lifecycle &lc,const bool newSignal,const PX_Sco
    }
    if(g_pxmFile<0)
    {
-      g_pxmAct.fellBack=true;
-      g_pxmAct.mode=PXM_MODE_FAILED;
-      g_pxmAct.headline="Aladin failed";
-      g_pxmAct.reason="Memory file unavailable - classic EA path (no Aladin actions).";
-      g_pxmAct.stepMemory=g_pxmAct.reason;
+      PXM_MarkDBFailure("Aladin database unavailable - classic EA path (no Aladin actions).");
+      return;
+   }
+   PXM_PruneMemoryStale();
+   if(g_pxmPendActive && (g_pxmPend.time<PXM_CutoffTime() || g_pxmPend.time>PXM_Now()))
+   {
+      g_pxmPendActive=false;
+      PXM_SavePendGV();
+   }
+   if(!PXM_PruneDB(false))
+   {
+      PXM_MarkDBFailure("Aladin database cleanup failed - classic EA path.");
       return;
    }
 
@@ -903,8 +1232,9 @@ void PX_FutureViewCheck(const PX_Lifecycle &lc,const bool newSignal,const PX_Sco
          {
             int win=(res==PXM_RESULT_TP1||res==PXM_RESULT_TP2||res==PXM_RESULT_BE)?1:0;
             if(res==PXM_RESULT_TMO) win=0;
-            PXM_AppendUpdate(g_pxmPend.time,g_pxmPend.dir,g_pxmPend.entry,g_pxmPend.sl,g_pxmPend.tp1,g_pxmPend.tp2,
-                             res,win,g_pxmPend.tp1hit,mae,pnl,bres);
+            if(!PXM_AppendUpdate(g_pxmPend.time,g_pxmPend.dir,g_pxmPend.entry,g_pxmPend.sl,g_pxmPend.tp1,g_pxmPend.tp2,
+                                 res,win,g_pxmPend.tp1hit,mae,pnl,bres))
+               return;
             Print("PREDICT-X ALADIN: unfilled/live-expired signal settled by OHLC projection.");
             g_pxmPendActive=false;
             PXM_SavePendGV();
@@ -946,8 +1276,9 @@ void PX_FutureViewCheck(const PX_Lifecycle &lc,const bool newSignal,const PX_Sco
                {
                   int win=(res==PXM_RESULT_TP1||res==PXM_RESULT_TP2||res==PXM_RESULT_BE)?1:0;
                   if(res==PXM_RESULT_TMO) win=0;
-                  PXM_AppendUpdate(g_pxmPend.time,g_pxmPend.dir,g_pxmPend.entry,g_pxmPend.sl,g_pxmPend.tp1,g_pxmPend.tp2,
-                                   res,win,g_pxmPend.tp1hit,mae,pnl,bres);
+                  if(!PXM_AppendUpdate(g_pxmPend.time,g_pxmPend.dir,g_pxmPend.entry,g_pxmPend.sl,g_pxmPend.tp1,g_pxmPend.tp2,
+                                       res,win,g_pxmPend.tp1hit,mae,pnl,bres))
+                     return;
                   Print("PREDICT-X ALADIN: signal-not-traded settled by projection.");
                   g_pxmPendActive=false;
                   PXM_SavePendGV();
@@ -966,28 +1297,38 @@ void PX_FutureViewCheck(const PX_Lifecycle &lc,const bool newSignal,const PX_Sco
    if(g_pxmRhActive)
    {
       int pct=(g_pxmRhTotal>0?(int)MathRound(100.0*g_pxmRhDone/(double)g_pxmRhTotal):0);
-      g_pxmAct.stepMemory=StringFormat("Building history %d%% (%d setups, %d resolved)",pct,g_pxmCount,g_pxmResolved);
+      g_pxmAct.stepMemory=StringFormat("Building fresh DB history %d%% (%d setups, %d resolved)",pct,g_pxmCount,g_pxmResolved);
       g_pxmAct.mode=PXM_MODE_LEARNING;
       g_pxmAct.headline="Aladin learning";
    }
    else
    {
-      g_pxmAct.stepMemory=StringFormat("Bank %d setups (%d resolved)",g_pxmCount,g_pxmResolved);
+      g_pxmAct.stepMemory=StringFormat("Fresh DB bank %d setups (%d resolved, %d-day window)",g_pxmCount,g_pxmResolved,PXM_DB_RETENTION_DAYS);
    }
 
    // 2) k-NN lookup for the CURRENT bar
-   if(g_pxmResolved>0 && sr.dir!=PX_DIR_NONE && ArraySize(feat)==12)
+   if(!g_pxmRhActive && g_pxmResolved>0 && sr.dir!=PX_DIR_NONE && ArraySize(feat)==12)
       PXM_LookupKNN(feat,(int)sr.dir,PXM_K_NEIGHBORS,g_pxmView);
 
-   if(g_pxmRhActive || g_pxmResolved<PXM_MIN_SAMPLES)
+   if(g_pxmRhActive)
    {
       g_pxmAct.mode=PXM_MODE_LEARNING;
       g_pxmAct.headline="Aladin learning";
-      g_pxmAct.stepLookup=StringFormat("Waiting for %d resolved outcomes before actions arm (have %d)",PXM_MIN_SAMPLES,g_pxmResolved);
+      g_pxmAct.stepLookup=StringFormat("Rehearsing history - waiting for %d resolved outcomes before actions arm (have %d)",PXM_MIN_SAMPLES,g_pxmResolved);
       g_pxmAct.stepRefuse="Idle - learning";
       g_pxmAct.stepSLTP="Idle - learning";
       g_pxmAct.stepResize="Idle - learning";
       g_pxmAct.stepGO="Idle - learning";
+   }
+   else if(g_pxmResolved<PXM_MIN_SAMPLES)
+   {
+      g_pxmAct.mode=PXM_MODE_READY;
+      g_pxmAct.headline="Aladin ready - small bank";
+      g_pxmAct.stepLookup=StringFormat("Rehearsal complete; bank has %d/%d resolved outcomes. Actions wait for more live outcomes.",g_pxmResolved,PXM_MIN_SAMPLES);
+      g_pxmAct.stepRefuse="Idle - small bank";
+      g_pxmAct.stepSLTP="Idle - small bank";
+      g_pxmAct.stepResize="Idle - small bank";
+      g_pxmAct.stepGO="Idle - small bank";
    }
    else if(sr.dir==PX_DIR_NONE)
    {
@@ -1185,7 +1526,8 @@ void PXM_ApplyTradeActions(PX_TradeSetup &ts,const PX_ScoreResult &sr,const doub
    double lf=baseLotFactor * MathMin(1.0, g_pxmAct.lotFactor);
    if(lf<=0.0) lf=baseLotFactor;
    // Snapshot classic geometry so a failed Aladin tweak can fall back safely.
-   PX_TradeSetup classic=ts;
+   PX_TradeSetup classic;
+   classic=ts;
    classic.sl=oldSL; classic.tp1=oldTP1; classic.tp2=oldTP2; classic.lot=oldLot;
    // After SL change, lot is recomputed from risk money target
    if(!PX_ApplyBrokerStopDistance(ts,ask,bid,useInitialSL,riskPct,lf))

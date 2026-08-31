@@ -52,7 +52,7 @@ input bool             InpTPSLAlerts          = true;             // TP1/TP2/SL 
 
 // --- ALADDIN: one master switch. OFF = classic PREDICT-X. ON = memory + Future View
 // --- panel + Phase B actions (smarter SL/TP, refuse, resize, stronger entry) with
-// --- internal standards. File/lookup failure falls back to classic behavior.
+// --- internal standards. Database/lookup failure falls back to classic behavior.
 input bool             InpEnableAladin        = true;             // Enable Aladin (memory + Future View + trade actions)
 
 // ALADDIN modules (after the single switch so they can read InpEnableAladin).
@@ -118,6 +118,28 @@ string PX_ShortTime(const datetime t)
 {
    MqlDateTime dt; TimeToStruct(t,dt);
    return StringFormat("%02d:%02d:%02d",dt.hour,dt.min,dt.sec);
+}
+
+bool PX_InStrategyTester()
+{
+   return ((bool)MQLInfoInteger(MQL_TESTER));
+}
+
+void PX_PumpAladinTesterFast()
+{
+   if(!PX_InStrategyTester() || !InpEnableAladin) return;
+   // In the MT5 Strategy Tester a 5-second timer can create huge numbers of
+   // synthetic timer events over long date ranges.  Pump Aladin from bar logic
+   // instead, in a few bounded fast chunks, so optimization/backtests do not
+   // spend days inside timer/panel work.
+   for(int guard=0; guard<6; guard++)
+   {
+      int beforeDone=g_pxmRhDone;
+      bool beforeActive=g_pxmRhActive;
+      PXM_RehearsePump(g_hST,g_hRSI,g_hADX,g_hATR14,g_hATR100,g_hKC,g_hTTM,g_basePreset,true);
+      if(!g_pxmRhActive) break;
+      if(beforeActive && g_pxmRhDone<=beforeDone) break;
+   }
 }
 
 bool PX_CreateHandles(const PX_Preset &p)
@@ -508,6 +530,7 @@ string PX_BuildSummaryText()
          if(g_pxmAct.fellBack || g_pxmFile<0) fv="Aladin failed - classic path";
          else if(g_pxmAct.refused) fv="Aladin REFUSED this setup";
          else if(g_pxmView.ready) fv=(g_pxmView.winPct>=55.0?"Aladin supports it":"Aladin is cautious");
+         else if(!g_pxmRhActive && g_pxmResolved<PXM_MIN_SAMPLES) fv="Aladin bank is small";
          else fv="Aladin is still learning";
       }
       return StringFormat("A %s %s (%d/100) is forming.\nEntry: %s. %s.",
@@ -522,6 +545,7 @@ string PX_BuildSummaryText()
 void PX_OnNewClosedBar()
 {
    PX_ResetDailyCountersIfNeeded();
+   PX_PumpAladinTesterFast();
    PX_ReadContexts();
    PX_CalculateScores();
    PX_Preset ap=g_regime.adjusted;
@@ -659,7 +683,9 @@ int OnInit()
    PXM_Init();
    PXM_RehearseStart(g_basePreset);
    g_lastBarTime=iTime(_Symbol,_Period,0);
-   EventSetTimer(5);
+   if(!PX_InStrategyTester())
+      EventSetTimer(5);
+   PX_PumpAladinTesterFast();
    PX_OnNewClosedBar();
    return INIT_SUCCEEDED;
 }
@@ -667,7 +693,7 @@ int OnInit()
 void OnDeinit(const int reason)
 {
    EventKillTimer();
-   PXM_OnDeinitCleanup(); // ALADDIN-IMP: PXM_ objects + rehearsal handles + memory file close
+   PXM_OnDeinitCleanup(); // ALADDIN-IMP: PXM_ objects + rehearsal handles + memory database close
    PX_ReleaseHandles();
    PX_DeleteObjects();
    PX_TM_DeleteObjects();
@@ -717,7 +743,7 @@ void OnTick()
 void OnTimer()
 {
    // ALADDIN: chunked rehearsal pump (history building; never touches live trading state).
-   PXM_RehearsePump(g_hST,g_hRSI,g_hADX,g_hATR14,g_hATR100,g_hKC,g_hTTM,g_basePreset);
+   PXM_RehearsePump(g_hST,g_hRSI,g_hADX,g_hATR14,g_hATR100,g_hKC,g_hTTM,g_basePreset,false);
    PX_DrawRegimeBar(g_regime);
    bool effectiveDailyLoss=(InpEnableTradeProtection && InpApplyDailyLossLimit);
    string toggRest=StringFormat("SL %s  ·  ALADIN %s  ·  DAILY %s",(InpUseInitialStopLoss?"ON":"OFF"),(InpEnableAladin?"ON":"OFF"),(effectiveDailyLoss?"ON":"OFF"));
