@@ -1275,7 +1275,7 @@ void PX_TM_DrawTradeLines(PX_TradeManagerState &tm)
    if(tm.lastTrail>0.0) PX2_HLine("TRAIL_LINE",tm.lastTrail,clrYellow,STYLE_SOLID,2);
 }
 
-void PX_TM_RenderOrderPanel(PX_TradeManagerState &tm,bool showPanel,const PX_TradeSetup &ts,const PX_ScoreResult &sr,const PX_Lifecycle &lc,const bool enableTradeProtection=true)
+void PX_TM_RenderOrderPanel(PX_TradeManagerState &tm,bool showPanel,const PX_TradeSetup &ts,const PX_ScoreResult &sr,const PX_Lifecycle &lc,const bool enableTradeProtection=true,bool trailbackTo1_3=true,bool trailbackTo2_3=true)
 {
    PX_TM_SyncFromPosition(tm);
    PX_TM_DrawTradeLines(tm);
@@ -1354,10 +1354,33 @@ void PX_TM_RenderOrderPanel(PX_TradeManagerState &tm,bool showPanel,const PX_Tra
       PX2_Label("ORDER_EARLY",x+34,y,StringFormat("EARLY LOCK: %d/3 | BEST: %s",tm.earlyStage,(tm.preTP1Best>0?DoubleToString(tm.preTP1Best,digs):"-")),(color)0x80D7FF,11); y+=18;
       PX2_Label("ORDER_POSTTP1",x+34,y,StringFormat("POST-TP1: %s | BEST: %s",(tm.postTP1MidLocked?"TP1 LOCKED":"WAIT MID"),(tm.postTP1Best>0?DoubleToString(tm.postTP1Best,digs):"-")),(color)0x80D7FF,11); y+=18;
       PX2_Label("ORDER_TRAIL",x+34,y,StringFormat("TRAIL: %s",(tm.lastTrail>0?DoubleToString(tm.lastTrail,digs):"waiting/armed by stages")),(color)0x66CCFF,11); y+=18;
+      string stStatus;
+      if(tm.protectArmed)
+      {
+         string bName="Entry->1/3";
+         if(tm.currentBucket==1) bName="1/3->2/3";
+         else if(tm.currentBucket==2) bName="2/3->90%";
+         else if(tm.currentBucket==3) bName="90%->TP1";
+         else if(tm.currentBucket==4) bName="Post-TP1";
+         stStatus=StringFormat("ARMED (B%d: %s)",tm.currentBucket,bName);
+      }
+      else
+      {
+         stStatus=(tm.triggerMoney>0.0?StringFormat("WAIT ($%.2f)",tm.triggerMoney):"WAIT TRIGGER");
+      }
+      PX2_Label("ORDER_STAIRCASE",x+34,y,StringFormat("STAIRCASE: %s",stStatus),(tm.protectArmed?(color)0x90EE90:(color)0xD0D0D0),11); y+=18;
+      PX2_Label("ORDER_TRAILBACK",x+34,y,StringFormat("TRAILBACK: 1/3 %s | 2/3 %s",(trailbackTo1_3?"ON":"OFF"),(trailbackTo2_3?"ON":"OFF")),((trailbackTo1_3||trailbackTo2_3)?(color)0x80D7FF:(color)0x888888),11); y+=18;
    }
    else
    {
-      PX2_Label("SEC_PROTECT",x+14,y,"5. PROTECTION STATUS: Trade will close by TP/SL",(color)0xFFD8A8,11,"Segoe UI");
+      PX2_Label("SEC_PROTECT",x+14,y,"5. PROTECTION STATUS: Trade will close by TP/SL",(color)0xFFD8A8,11,"Segoe UI"); y+=18;
+   }
+
+   int needH=y+14-PX_RIGHT_PNL_Y;
+   if(needH>h)
+   {
+      h=needH;
+      ObjectSetInteger(0,PX2_PREFIX+"ORDER_BG",OBJPROP_YSIZE,h);
    }
 }
 
