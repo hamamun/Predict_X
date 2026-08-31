@@ -25,8 +25,10 @@
 #include "PX_Layer3_Value.mqh"
 #include "PX_Layer5_Markov.mqh"
 
-#define PXM_RH_BUDGET_US 80000
-#define PXM_RH_MIN_BARS  110
+#define PXM_RH_BUDGET_US       120000
+#define PXM_RH_FAST_BUDGET_US  600000
+#define PXM_RH_FAST_PER_PASS   750
+#define PXM_RH_MIN_BARS        110
 
 //--- per-bar simulated state (rehearsal private; nothing here touches live globals)
 struct PXM_RhSim
@@ -51,6 +53,35 @@ int g_pxmRhBMin=0;
 int g_pxmRhPrintPct=0;
 int g_pxmRhStH1=INVALID_HANDLE;
 int g_pxmRhStH2=INVALID_HANDLE;
+
+//--- Fast rehearsal cache.  The old rehearsal path queried MT5 history and
+//--- indicator buffers many times for every historical bar (CopyBuffer,
+//--- CopyRates, iOpen/iHigh/iLow/iClose).  Some terminals/brokers answer those
+//--- deep-shift calls very slowly, so Aladin could sit in "learning" for hours.
+//--- We bulk-copy the required window once at rehearsal start, then all bar
+//--- replay math reads local arrays.  If any cache piece is missing, the helper
+//--- functions fall back to the MT5 calls so learning still works.
+bool     g_pxmRhCacheBuilt=false;
+bool     g_pxmRhCacheReady=false;
+bool     g_pxmRhCacheHTF1=false;
+bool     g_pxmRhCacheHTF2=false;
+MqlRates g_pxmRhRates[];
+MqlRates g_pxmRhRatesH1[];
+MqlRates g_pxmRhRatesH2[];
+double   g_pxmRhATR14[];
+double   g_pxmRhATR100[];
+double   g_pxmRhADX[];
+double   g_pxmRhSTLine[];
+double   g_pxmRhSTDir[];
+double   g_pxmRhRSI[];
+double   g_pxmRhTTM[];
+double   g_pxmRhTTMSqz[];
+double   g_pxmRhTTMFired[];
+double   g_pxmRhKCU[];
+double   g_pxmRhKCM[];
+double   g_pxmRhKCL[];
+double   g_pxmRhHTF1STDir[];
+double   g_pxmRhHTF2STDir[];
 
 //+------------------------------------------------------------------+
 //| Shift-aware buffer reads (copies of PX_Copy1/PX_Copy2 that take  |
@@ -81,6 +112,272 @@ int PXM_RhSTDir(const int handle,const int shift)
    return (v>0.0?1:(v<0.0?-1:0));
 }
 
+void PXM_RhClearCache()
+{
+   g_pxmRhCacheBuilt=false;
+   g_pxmRhCacheReady=false;
+   g_pxmRhCacheHTF1=false;
+   g_pxmRhCacheHTF2=false;
+   ArrayResize(g_pxmRhRates,0);
+   ArrayResize(g_pxmRhRatesH1,0);
+   ArrayResize(g_pxmRhRatesH2,0);
+   ArrayResize(g_pxmRhATR14,0);
+   ArrayResize(g_pxmRhATR100,0);
+   ArrayResize(g_pxmRhADX,0);
+   ArrayResize(g_pxmRhSTLine,0);
+   ArrayResize(g_pxmRhSTDir,0);
+   ArrayResize(g_pxmRhRSI,0);
+   ArrayResize(g_pxmRhTTM,0);
+   ArrayResize(g_pxmRhTTMSqz,0);
+   ArrayResize(g_pxmRhTTMFired,0);
+   ArrayResize(g_pxmRhKCU,0);
+   ArrayResize(g_pxmRhKCM,0);
+   ArrayResize(g_pxmRhKCL,0);
+   ArrayResize(g_pxmRhHTF1STDir,0);
+   ArrayResize(g_pxmRhHTF2STDir,0);
+}
+
+bool PXM_RhCopyRatesSeries(const ENUM_TIMEFRAMES tf,const int count,MqlRates &rates[])
+{
+   ArrayResize(rates,0);
+   if(count<=0) return false;
+   ArraySetAsSeries(rates,true);
+   int copied=CopyRates(_Symbol,tf,0,count,rates);
+   return (copied>0);
+}
+
+bool PXM_RhCopyIndicatorSeries(const int handle,const int buffer,const int count,double &values[])
+{
+   ArrayResize(values,0);
+   if(handle==INVALID_HANDLE || count<=0) return false;
+   ArraySetAsSeries(values,true);
+   int copied=CopyBuffer(handle,buffer,0,count,values);
+   return (copied>0);
+}
+
+bool PXM_RhBufValue(const double &values[],const int shift,double &value)
+{
+   int n=ArraySize(values);
+   if(shift<0 || shift>=n) return false;
+   value=values[shift];
+   return true;
+}
+
+bool PXM_RhHasRate(const int shift)
+{
+   return (g_pxmRhCacheReady && shift>=0 && shift<ArraySize(g_pxmRhRates));
+}
+
+double PXM_RhOpen(const int shift)
+{
+   if(PXM_RhHasRate(shift)) return g_pxmRhRates[shift].open;
+   return iOpen(_Symbol,_Period,shift);
+}
+
+double PXM_RhHigh(const int shift)
+{
+   if(PXM_RhHasRate(shift)) return g_pxmRhRates[shift].high;
+   return iHigh(_Symbol,_Period,shift);
+}
+
+double PXM_RhLow(const int shift)
+{
+   if(PXM_RhHasRate(shift)) return g_pxmRhRates[shift].low;
+   return iLow(_Symbol,_Period,shift);
+}
+
+double PXM_RhClose(const int shift)
+{
+   if(PXM_RhHasRate(shift)) return g_pxmRhRates[shift].close;
+   return iClose(_Symbol,_Period,shift);
+}
+
+datetime PXM_RhTime(const int shift)
+{
+   if(PXM_RhHasRate(shift)) return g_pxmRhRates[shift].time;
+   return iTime(_Symbol,_Period,shift);
+}
+
+double PXM_RhHighestHigh(const int startShift,const int count)
+{
+   if(count<=0) return 0.0;
+   if(g_pxmRhCacheReady && startShift>=0 && startShift+count<=ArraySize(g_pxmRhRates))
+   {
+      double v=g_pxmRhRates[startShift].high;
+      for(int i=startShift+1;i<startShift+count;i++)
+         if(g_pxmRhRates[i].high>v) v=g_pxmRhRates[i].high;
+      return v;
+   }
+   return PX_HighestHigh(_Symbol,_Period,startShift,count);
+}
+
+double PXM_RhLowestLow(const int startShift,const int count)
+{
+   if(count<=0) return 0.0;
+   if(g_pxmRhCacheReady && startShift>=0 && startShift+count<=ArraySize(g_pxmRhRates))
+   {
+      double v=g_pxmRhRates[startShift].low;
+      for(int i=startShift+1;i<startShift+count;i++)
+         if(g_pxmRhRates[i].low<v) v=g_pxmRhRates[i].low;
+      return v;
+   }
+   return PX_LowestLow(_Symbol,_Period,startShift,count);
+}
+
+double PXM_RhRecentSwingHigh(const int startShift,const int bars)
+{
+   return PXM_RhHighestHigh(startShift,bars);
+}
+
+double PXM_RhRecentSwingLow(const int startShift,const int bars)
+{
+   return PXM_RhLowestLow(startShift,bars);
+}
+
+datetime PXM_RhVWAPResetTime(const datetime barTime)
+{
+   MqlDateTime dt; TimeToStruct(barTime,dt);
+   MqlDateTime reset=dt;
+   if(dt.hour<17)
+   {
+      datetime prev=barTime-86400;
+      TimeToStruct(prev,reset);
+   }
+   reset.hour=17; reset.min=0; reset.sec=0;
+   return StructToTime(reset);
+}
+
+double PXM_RhVWAPFromRates(const MqlRates &rates[],const int shift)
+{
+   int n=ArraySize(rates);
+   if(shift<0 || shift>=n) return 0.0;
+   datetime resetTime=PXM_RhVWAPResetTime(rates[shift].time);
+   double pv=0.0, vv=0.0;
+   int end=shift+500;
+   if(end>n) end=n;
+   for(int i=shift;i<end;i++)
+   {
+      if(rates[i].time<resetTime) break;
+      double typical=(rates[i].high+rates[i].low+rates[i].close)/3.0;
+      double vol=(rates[i].real_volume>0 ? (double)rates[i].real_volume : (double)rates[i].tick_volume);
+      pv+=typical*vol;
+      vv+=vol;
+   }
+   if(vv<=0.0) return rates[shift].close;
+   return pv/vv;
+}
+
+double PXM_RhCalcVWAP(const int shift)
+{
+   if(g_pxmRhCacheReady)
+   {
+      double v=PXM_RhVWAPFromRates(g_pxmRhRates,shift);
+      if(v>0.0) return v;
+   }
+   return PX_CalcVWAP(_Symbol,_Period,shift);
+}
+
+double PXM_RhKaufmanER(const int lookback,const int shift)
+{
+   if(lookback<=0) return 0.0;
+   if(g_pxmRhCacheReady && shift>=0 && shift+lookback<ArraySize(g_pxmRhRates))
+   {
+      double net=MathAbs(g_pxmRhRates[shift].close-g_pxmRhRates[shift+lookback].close);
+      double denom=0.0;
+      for(int i=0;i<lookback;i++)
+         denom+=MathAbs(g_pxmRhRates[shift+i].close-g_pxmRhRates[shift+i+1].close);
+      if(denom<=0.0) return 0.0;
+      return net/denom;
+   }
+   return PX_KaufmanER(_Symbol,_Period,lookback,shift);
+}
+
+int PXM_RhHTFShiftForChartBar(const int chartShift,const ENUM_TIMEFRAMES htf)
+{
+   double chartSec=(double)PeriodSeconds(_Period);
+   double htfSec=(double)PeriodSeconds(htf);
+   if(chartSec<=0.0 || htfSec<=0.0) return (chartShift<1?1:chartShift);
+   if(htfSec>chartSec)
+   {
+      int mapped=(int)MathFloor((chartShift+1)*chartSec/htfSec);
+      return (mapped<1?1:mapped);
+   }
+   return (chartShift<1?1:chartShift);
+}
+
+int PXM_RhHTFMaxShift(const int chartShiftMax,const ENUM_TIMEFRAMES htf)
+{
+   return PXM_RhHTFShiftForChartBar(chartShiftMax,htf);
+}
+
+double PXM_RhHTFClose(const int which,const ENUM_TIMEFRAMES tf,const int shift)
+{
+   if(which==1 && g_pxmRhCacheHTF1 && shift>=0 && shift<ArraySize(g_pxmRhRatesH1)) return g_pxmRhRatesH1[shift].close;
+   if(which==2 && g_pxmRhCacheHTF2 && shift>=0 && shift<ArraySize(g_pxmRhRatesH2)) return g_pxmRhRatesH2[shift].close;
+   return iClose(_Symbol,tf,shift);
+}
+
+double PXM_RhHTFVWAP(const int which,const ENUM_TIMEFRAMES tf,const int shift)
+{
+   if(which==1 && g_pxmRhCacheHTF1)
+   {
+      double v=PXM_RhVWAPFromRates(g_pxmRhRatesH1,shift);
+      if(v>0.0) return v;
+   }
+   if(which==2 && g_pxmRhCacheHTF2)
+   {
+      double v=PXM_RhVWAPFromRates(g_pxmRhRatesH2,shift);
+      if(v>0.0) return v;
+   }
+   return PX_CalcVWAP(_Symbol,tf,shift);
+}
+
+int PXM_RhHTFSTDir(const int which,const int handle,const int shift)
+{
+   double v=0.0;
+   if(which==1 && PXM_RhBufValue(g_pxmRhHTF1STDir,shift,v)) return (v>0.0?1:(v<0.0?-1:0));
+   if(which==2 && PXM_RhBufValue(g_pxmRhHTF2STDir,shift,v)) return (v>0.0?1:(v<0.0?-1:0));
+   return PXM_RhSTDir(handle,shift);
+}
+
+void PXM_RhBuildCache(const int bMax,const int hST,const int hRSI,const int hADX,const int hATR14,const int hATR100,const int hKC,const int hTTM,const PX_Preset &base)
+{
+   PXM_RhClearCache();
+   g_pxmRhCacheBuilt=true;
+
+   // +520 covers VWAP's 500-bar session window plus the deepest layer lookbacks
+   // (Markov 102 bars, SMC/swing/outcome windows).  Helpers still bounds-check.
+   int chartNeed=bMax+520;
+   int minChartNeed=PXM_RH_MIN_BARS+PXM_SIM_BARS+520;
+   if(chartNeed<minChartNeed) chartNeed=minChartNeed;
+   g_pxmRhCacheReady=PXM_RhCopyRatesSeries(_Period,chartNeed,g_pxmRhRates);
+   PXM_RhCopyIndicatorSeries(hATR14,0,chartNeed,g_pxmRhATR14);
+   PXM_RhCopyIndicatorSeries(hATR100,0,chartNeed,g_pxmRhATR100);
+   PXM_RhCopyIndicatorSeries(hADX,0,chartNeed,g_pxmRhADX);
+   PXM_RhCopyIndicatorSeries(hST,0,chartNeed,g_pxmRhSTLine);
+   PXM_RhCopyIndicatorSeries(hST,1,chartNeed,g_pxmRhSTDir);
+   PXM_RhCopyIndicatorSeries(hRSI,0,chartNeed,g_pxmRhRSI);
+   PXM_RhCopyIndicatorSeries(hTTM,0,chartNeed,g_pxmRhTTM);
+   PXM_RhCopyIndicatorSeries(hTTM,1,chartNeed,g_pxmRhTTMSqz);
+   PXM_RhCopyIndicatorSeries(hTTM,2,chartNeed,g_pxmRhTTMFired);
+   PXM_RhCopyIndicatorSeries(hKC,0,chartNeed,g_pxmRhKCU);
+   PXM_RhCopyIndicatorSeries(hKC,1,chartNeed,g_pxmRhKCM);
+   PXM_RhCopyIndicatorSeries(hKC,2,chartNeed,g_pxmRhKCL);
+
+   int h1Need=PXM_RhHTFMaxShift(bMax,base.htf1)+520;
+   int h2Need=PXM_RhHTFMaxShift(bMax,base.htf2)+520;
+   g_pxmRhCacheHTF1=PXM_RhCopyRatesSeries(base.htf1,h1Need,g_pxmRhRatesH1);
+   g_pxmRhCacheHTF2=PXM_RhCopyRatesSeries(base.htf2,h2Need,g_pxmRhRatesH2);
+   PXM_RhCopyIndicatorSeries(g_pxmRhStH1,1,h1Need,g_pxmRhHTF1STDir);
+   PXM_RhCopyIndicatorSeries(g_pxmRhStH2,1,h2Need,g_pxmRhHTF2STDir);
+
+   if(g_pxmRhCacheReady)
+      Print("PREDICT-X ALADIN: fast rehearsal cache ready (",ArraySize(g_pxmRhRates)," chart bars; HTF ",
+            ArraySize(g_pxmRhRatesH1),"/",ArraySize(g_pxmRhRatesH2),").");
+   else
+      Print("PREDICT-X ALADIN: fast rehearsal cache unavailable - using MT5 history fallback.");
+}
+
 //+------------------------------------------------------------------+
 //| COPY of PX_ScoreLayer1 (SMC) with base shift b (live uses b=1).  |
 //| Math is identical; only the shift is parameterized.              |
@@ -93,9 +390,9 @@ int PXM_RhScoreLayer1(const int b,const PX_Direction dir,const double price,cons
    bool hasSweep=false;
    int pts=0;
 
-   double h1=iHigh(_Symbol,_Period,b), l1=iLow(_Symbol,_Period,b), c1=iClose(_Symbol,_Period,b);
-   double prevHigh=PX_HighestHigh(_Symbol,_Period,b+1,10);
-   double prevLow=PX_LowestLow(_Symbol,_Period,b+1,10);
+   double h1=PXM_RhHigh(b), l1=PXM_RhLow(b), c1=PXM_RhClose(b);
+   double prevHigh=PXM_RhHighestHigh(b+1,10);
+   double prevLow=PXM_RhLowestLow(b+1,10);
    if(prevHigh<=0.0 || prevLow<=0.0 || h1<=0.0 || c1<=0.0) return -1;
 
    int sweepPts=0;
@@ -114,9 +411,9 @@ int PXM_RhScoreLayer1(const int b,const PX_Direction dir,const double price,cons
    int obPts=0;
    for(int i=b+1;i<b+30;i++)
    {
-      double o=iOpen(_Symbol,_Period,i), c=iClose(_Symbol,_Period,i), h=iHigh(_Symbol,_Period,i), l=iLow(_Symbol,_Period,i);
+      double o=PXM_RhOpen(i), c=PXM_RhClose(i), h=PXM_RhHigh(i), l=PXM_RhLow(i);
       if(o<=0.0 || c<=0.0) break;
-      double nC=iClose(_Symbol,_Period,i-1);
+      double nC=PXM_RhClose(i-1);
       bool impulse=(MathAbs(nC-c)>0.8*atr);
       if(buy && c<o && impulse && nC>c)
       {
@@ -136,8 +433,8 @@ int PXM_RhScoreLayer1(const int b,const PX_Direction dir,const double price,cons
    int fvgPts=0;
    for(int i=b;i<b+20;i++)
    {
-      double hOld=iHigh(_Symbol,_Period,i+2), lOld=iLow(_Symbol,_Period,i+2);
-      double hNew=iHigh(_Symbol,_Period,i), lNew=iLow(_Symbol,_Period,i);
+      double hOld=PXM_RhHigh(i+2), lOld=PXM_RhLow(i+2);
+      double hNew=PXM_RhHigh(i), lNew=PXM_RhLow(i);
       if(hNew<=0.0 || hOld<=0.0) break;
       if(buy && lNew>hOld) { fvgPts=5; break; }
       if(!buy && hNew<lOld) { fvgPts=5; break; }
@@ -154,13 +451,23 @@ int PXM_RhScoreLayer1(const int b,const PX_Direction dir,const double price,cons
 //+------------------------------------------------------------------+
 int PXM_RhScoreLayer5(const int b,const PX_Direction dir,const double atr)
 {
-   double close[]; ArraySetAsSeries(close,true);
-   if(CopyClose(_Symbol,_Period,b,102,close)<102 || atr<=0.0) return -1;
+   if(atr<=0.0) return -1;
+   double closeVals[102];
+   if(g_pxmRhCacheReady && b>=0 && b+101<ArraySize(g_pxmRhRates))
+   {
+      for(int i=0;i<102;i++) closeVals[i]=g_pxmRhRates[b+i].close;
+   }
+   else
+   {
+      double close[]; ArraySetAsSeries(close,true);
+      if(CopyClose(_Symbol,_Period,b,102,close)<102) return -1;
+      for(int i=0;i<102;i++) closeVals[i]=close[i];
+   }
    int counts[3][3];
    for(int a=0;a<3;a++) for(int c=0;c<3;c++) counts[a][c]=0;
    double th=0.4*atr;
    int states[101];
-   for(int i=0;i<101;i++) states[i]=PX_StateFromChange(close[i]-close[i+1],th);
+   for(int i=0;i<101;i++) states[i]=PX_StateFromChange(closeVals[i]-closeVals[i+1],th);
    for(int i=100;i>=1;i--) counts[states[i]][states[i-1]]++;
    int cur=states[0];
    int rowSum=counts[cur][0]+counts[cur][1]+counts[cur][2];
@@ -189,14 +496,12 @@ int PXM_RhScoreLayer5(const int b,const PX_Direction dir,const double atr)
 int PXM_RhScoreLayer4(const int b,const PX_Direction dir,const PX_Preset &ap)
 {
    bool buy=(dir==PX_DIR_BUY);
-   double chartSec=(double)PeriodSeconds(_Period);
    int total=0;
 
-   double htfSec1=(double)PeriodSeconds(ap.htf1);
-   int hb1=(htfSec1>chartSec? MathMax(1,(int)MathFloor((b+1)*chartSec/htfSec1)) : MathMax(1,b));
-   int st1=PXM_RhSTDir(g_pxmRhStH1,hb1);
-   double c1=iClose(_Symbol,ap.htf1,hb1);
-   double v1=PX_CalcVWAP(_Symbol,ap.htf1,hb1);
+   int hb1=PXM_RhHTFShiftForChartBar(b,ap.htf1);
+   int st1=PXM_RhHTFSTDir(1,g_pxmRhStH1,hb1);
+   double c1=PXM_RhHTFClose(1,ap.htf1,hb1);
+   double v1=PXM_RhHTFVWAP(1,ap.htf1,hb1);
    int agree1=0;
    if(c1>0.0 && v1>0.0)
    {
@@ -205,11 +510,10 @@ int PXM_RhScoreLayer4(const int b,const PX_Direction dir,const PX_Preset &ap)
    }
    total+=(agree1==2?7:(agree1==1?3:0));
 
-   double htfSec2=(double)PeriodSeconds(ap.htf2);
-   int hb2=(htfSec2>chartSec? MathMax(1,(int)MathFloor((b+1)*chartSec/htfSec2)) : MathMax(1,b));
-   int st2=PXM_RhSTDir(g_pxmRhStH2,hb2);
-   double c2=iClose(_Symbol,ap.htf2,hb2);
-   double v2=PX_CalcVWAP(_Symbol,ap.htf2,hb2);
+   int hb2=PXM_RhHTFShiftForChartBar(b,ap.htf2);
+   int st2=PXM_RhHTFSTDir(2,g_pxmRhStH2,hb2);
+   double c2=PXM_RhHTFClose(2,ap.htf2,hb2);
+   double v2=PXM_RhHTFVWAP(2,ap.htf2,hb2);
    int agree2=0;
    if(c2>0.0 && v2>0.0)
    {
@@ -225,9 +529,9 @@ int PXM_RhScoreLayer4(const int b,const PX_Direction dir,const PX_Preset &ap)
 //| Mirrors PX_CandleConfirmationScore(); returns bonus pts and      |
 //| reports the opposite-candle warning flag used by the entry gates.|
 //+------------------------------------------------------------------+
-double PXM_RhBody(const int sh){ return MathAbs(iClose(_Symbol,_Period,sh)-iOpen(_Symbol,_Period,sh)); }
-bool PXM_RhBull(const int sh){ return iClose(_Symbol,_Period,sh)>iOpen(_Symbol,_Period,sh); }
-bool PXM_RhBear(const int sh){ return iClose(_Symbol,_Period,sh)<iOpen(_Symbol,_Period,sh); }
+double PXM_RhBody(const int sh){ return MathAbs(PXM_RhClose(sh)-PXM_RhOpen(sh)); }
+bool PXM_RhBull(const int sh){ return PXM_RhClose(sh)>PXM_RhOpen(sh); }
+bool PXM_RhBear(const int sh){ return PXM_RhClose(sh)<PXM_RhOpen(sh); }
 
 double PXM_RhAvgBody(const int startShift)
 {
@@ -242,26 +546,26 @@ double PXM_RhAvgBody(const int startShift)
 
 bool PXM_RhBullEngulf(const int b)
 {
-   double o1=iOpen(_Symbol,_Period,b), c1=iClose(_Symbol,_Period,b);
-   double o2=iOpen(_Symbol,_Period,b+1), c2=iClose(_Symbol,_Period,b+1);
+   double o1=PXM_RhOpen(b), c1=PXM_RhClose(b);
+   double o2=PXM_RhOpen(b+1), c2=PXM_RhClose(b+1);
    return (c2<o2 && c1>o1 && c1>=o2 && o1<=c2);
 }
 bool PXM_RhBearEngulf(const int b)
 {
-   double o1=iOpen(_Symbol,_Period,b), c1=iClose(_Symbol,_Period,b);
-   double o2=iOpen(_Symbol,_Period,b+1), c2=iClose(_Symbol,_Period,b+1);
+   double o1=PXM_RhOpen(b), c1=PXM_RhClose(b);
+   double o2=PXM_RhOpen(b+1), c2=PXM_RhClose(b+1);
    return (c2>o2 && c1<o1 && c1<=o2 && o1>=c2);
 }
 bool PXM_RhBullPin(const int b)
 {
-   double o=iOpen(_Symbol,_Period,b), c=iClose(_Symbol,_Period,b), h=iHigh(_Symbol,_Period,b), l=iLow(_Symbol,_Period,b);
+   double o=PXM_RhOpen(b), c=PXM_RhClose(b), h=PXM_RhHigh(b), l=PXM_RhLow(b);
    double body=MathMax(_Point,MathAbs(c-o));
    double lower=MathMin(o,c)-l, upper=h-MathMax(o,c);
    return (lower>=2.0*body && upper<=1.2*body && c>l+0.55*(h-l));
 }
 bool PXM_RhBearPin(const int b)
 {
-   double o=iOpen(_Symbol,_Period,b), c=iClose(_Symbol,_Period,b), h=iHigh(_Symbol,_Period,b), l=iLow(_Symbol,_Period,b);
+   double o=PXM_RhOpen(b), c=PXM_RhClose(b), h=PXM_RhHigh(b), l=PXM_RhLow(b);
    double body=MathMax(_Point,MathAbs(c-o));
    double upper=h-MathMax(o,c), lower=MathMin(o,c)-l;
    return (upper>=2.0*body && lower<=1.2*body && c<l+0.45*(h-l));
@@ -269,23 +573,23 @@ bool PXM_RhBearPin(const int b)
 bool PXM_RhMorning(const int b)
 {
    return (PXM_RhBear(b+2) && PXM_RhBody(b+1)<0.7*PXM_RhBody(b+2) && PXM_RhBull(b) &&
-           iClose(_Symbol,_Period,b)>(iOpen(_Symbol,_Period,b+2)+iClose(_Symbol,_Period,b+2))/2.0);
+           PXM_RhClose(b)>(PXM_RhOpen(b+2)+PXM_RhClose(b+2))/2.0);
 }
 bool PXM_RhEvening(const int b)
 {
    return (PXM_RhBull(b+2) && PXM_RhBody(b+1)<0.7*PXM_RhBody(b+2) && PXM_RhBear(b) &&
-           iClose(_Symbol,_Period,b)<(iOpen(_Symbol,_Period,b+2)+iClose(_Symbol,_Period,b+2))/2.0);
+           PXM_RhClose(b)<(PXM_RhOpen(b+2)+PXM_RhClose(b+2))/2.0);
 }
 bool PXM_RhStrongBull(const int b)
 {
    double avg=PXM_RhAvgBody(b+1);
-   double h=iHigh(_Symbol,_Period,b), l=iLow(_Symbol,_Period,b), c=iClose(_Symbol,_Period,b);
+   double h=PXM_RhHigh(b), l=PXM_RhLow(b), c=PXM_RhClose(b);
    return (PXM_RhBull(b) && PXM_RhBody(b)>=1.15*avg && c>=l+0.70*(h-l));
 }
 bool PXM_RhStrongBear(const int b)
 {
    double avg=PXM_RhAvgBody(b+1);
-   double h=iHigh(_Symbol,_Period,b), l=iLow(_Symbol,_Period,b), c=iClose(_Symbol,_Period,b);
+   double h=PXM_RhHigh(b), l=PXM_RhLow(b), c=PXM_RhClose(b);
    return (PXM_RhBear(b) && PXM_RhBody(b)>=1.15*avg && c<=l+0.30*(h-l));
 }
 
@@ -352,24 +656,26 @@ bool PXM_RhScoreBar(const int b,const int hST,const int hRSI,const int hADX,cons
    double atr14=0.0,atr100=0.0,adx=0.0,st=0.0,stDirRaw=0.0,rsi=50.0,rsiPrev=50.0,ttm=0.0,ttmPrev=0.0,sqz=0.0,fired=0.0;
    double kcU=0.0,kcM=0.0,kcL=0.0;
    bool ok=true;
-   ok=(PXM_RhCopy1(hATR14,0,b,atr14)&&ok);
-   ok=(PXM_RhCopy1(hATR100,0,b,atr100)&&ok);
-   ok=(PXM_RhCopy1(hADX,0,b,adx)&&ok);
-   ok=(PXM_RhCopy1(hST,0,b,st)&&ok);
-   ok=(PXM_RhCopy1(hST,1,b,stDirRaw)&&ok);
-   ok=(PXM_RhCopy2(hRSI,0,b,rsi,rsiPrev)&&ok);
-   ok=(PXM_RhCopy2(hTTM,0,b,ttm,ttmPrev)&&ok);
-   ok=(PXM_RhCopy1(hTTM,1,b,sqz)&&ok);
-   ok=(PXM_RhCopy1(hTTM,2,b,fired)&&ok);
-   ok=(PXM_RhCopy1(hKC,0,b,kcU)&&ok);
-   ok=(PXM_RhCopy1(hKC,1,b,kcM)&&ok);
-   ok=(PXM_RhCopy1(hKC,2,b,kcL)&&ok);
+   if(!PXM_RhBufValue(g_pxmRhATR14,b,atr14))     ok=(PXM_RhCopy1(hATR14,0,b,atr14)&&ok);
+   if(!PXM_RhBufValue(g_pxmRhATR100,b,atr100))   ok=(PXM_RhCopy1(hATR100,0,b,atr100)&&ok);
+   if(!PXM_RhBufValue(g_pxmRhADX,b,adx))         ok=(PXM_RhCopy1(hADX,0,b,adx)&&ok);
+   if(!PXM_RhBufValue(g_pxmRhSTLine,b,st))       ok=(PXM_RhCopy1(hST,0,b,st)&&ok);
+   if(!PXM_RhBufValue(g_pxmRhSTDir,b,stDirRaw))  ok=(PXM_RhCopy1(hST,1,b,stDirRaw)&&ok);
+   if(!(PXM_RhBufValue(g_pxmRhRSI,b,rsi) && PXM_RhBufValue(g_pxmRhRSI,b+1,rsiPrev)))
+      ok=(PXM_RhCopy2(hRSI,0,b,rsi,rsiPrev)&&ok);
+   if(!(PXM_RhBufValue(g_pxmRhTTM,b,ttm) && PXM_RhBufValue(g_pxmRhTTM,b+1,ttmPrev)))
+      ok=(PXM_RhCopy2(hTTM,0,b,ttm,ttmPrev)&&ok);
+   if(!PXM_RhBufValue(g_pxmRhTTMSqz,b,sqz))      ok=(PXM_RhCopy1(hTTM,1,b,sqz)&&ok);
+   if(!PXM_RhBufValue(g_pxmRhTTMFired,b,fired))  ok=(PXM_RhCopy1(hTTM,2,b,fired)&&ok);
+   if(!PXM_RhBufValue(g_pxmRhKCU,b,kcU))         ok=(PXM_RhCopy1(hKC,0,b,kcU)&&ok);
+   if(!PXM_RhBufValue(g_pxmRhKCM,b,kcM))         ok=(PXM_RhCopy1(hKC,1,b,kcM)&&ok);
+   if(!PXM_RhBufValue(g_pxmRhKCL,b,kcL))         ok=(PXM_RhCopy1(hKC,2,b,kcL)&&ok);
    if(!ok) return false;
    if(atr14<=0.0 || atr100<=0.0 || adx<=0.0) return false;
 
-   double price=iClose(_Symbol,_Period,b);
+   double price=PXM_RhClose(b);
    if(price<=0.0) return false;
-   double vwap=PX_CalcVWAP(_Symbol,_Period,b);
+   double vwap=PXM_RhCalcVWAP(b);
    if(vwap<=0.0) return false;
 
    s.price=price; s.vwap=vwap; s.atr=atr14; s.atr100=atr100;
@@ -382,7 +688,7 @@ bool PXM_RhScoreBar(const int b,const int hST,const int hRSI,const int hADX,cons
    s.dir=dir;
    if(dir==PX_DIR_NONE) return false;
 
-   double er=PX_KaufmanER(_Symbol,_Period,20,b);
+   double er=PXM_RhKaufmanER(20,b);
    double ratio=atr14/atr100;
    s.er=er; s.ratio=ratio;
 
@@ -394,7 +700,7 @@ bool PXM_RhScoreBar(const int b,const int hST,const int hRSI,const int hADX,cons
    s.expiry=ap.signalExpiryBars;
 
    // session gate (live: TradeManager refuses/cancels outside allowed session)
-   datetime bt=iTime(_Symbol,_Period,b);
+   datetime bt=PXM_RhTime(b);
    if(bt<=0) return false;
    if(!PX_SessionAllowed(InpTradingSessions,bt)) return false;
 
@@ -516,7 +822,7 @@ bool PXM_RhSimulate(const int b,const PXM_RhSim &s,const PX_Preset &ap,
    int fillShift=-1;
    if(method==1)
    {
-      double o=iOpen(_Symbol,_Period,b-1);
+      double o=PXM_RhOpen(b-1);
       if(o<=0.0) return false;
       entry=(buy? o+spread : o);
       fillShift=b-1;
@@ -526,7 +832,7 @@ bool PXM_RhSimulate(const int b,const PXM_RhSim &s,const PX_Preset &ap,
       int jStop=MathMax(1,b-expiry);
       for(int j=b-1;j>=jStop;j--)
       {
-         double o=iOpen(_Symbol,_Period,j), h=iHigh(_Symbol,_Period,j), l=iLow(_Symbol,_Period,j);
+         double o=PXM_RhOpen(j), h=PXM_RhHigh(j), l=PXM_RhLow(j);
          if(o<=0.0) break;
          if(buy)
          {
@@ -547,7 +853,7 @@ bool PXM_RhSimulate(const int b,const PXM_RhSim &s,const PX_Preset &ap,
 
    double buffer=0.10*atr;
    double atrSL=sl;
-   double swingSL=(buy? PX_RecentSwingLow(b,12)-buffer : PX_RecentSwingHigh(b,12)+buffer);
+   double swingSL=(buy? PXM_RhRecentSwingLow(b,12)-buffer : PXM_RhRecentSwingHigh(b,12)+buffer);
    double stSL=(s.stLine>0.0?(buy?s.stLine-buffer:s.stLine+buffer):atrSL);
    double obSL=atrSL;
    if(s.hasOB) obSL=(buy? s.obBottom-buffer : s.obTop+buffer);
@@ -569,7 +875,7 @@ bool PXM_RhSimulate(const int b,const PXM_RhSim &s,const PX_Preset &ap,
    double risk=MathAbs(entry-sl);
    if(risk<=0.0) return false;
    double defaultTP1Dist=MathMax(0.80*risk,MathMin(1.20*risk,1.10*atr));
-   double swingTarget=(buy? PX_RecentSwingHigh(b,16) : PX_RecentSwingLow(b,16));
+   double swingTarget=(buy? PXM_RhRecentSwingHigh(b,16) : PXM_RhRecentSwingLow(b,16));
    double swingDist=(buy? swingTarget-entry : entry-swingTarget);
    double tp1Dist=defaultTP1Dist;
    if(swingTarget>0.0 && swingDist>=0.80*risk && swingDist<=1.50*risk) tp1Dist=MathMin(tp1Dist,swingDist);
@@ -595,7 +901,7 @@ bool PXM_RhSimulate(const int b,const PXM_RhSim &s,const PX_Preset &ap,
    result=PXM_RESULT_NONE;
    for(int j=fillShift;j>=jEnd;j--)
    {
-      double h=iHigh(_Symbol,_Period,j), l=iLow(_Symbol,_Period,j);
+      double h=PXM_RhHigh(j), l=PXM_RhLow(j);
       if(h<=0.0 || l<=0.0) break;
       if(h>maxHigh) maxHigh=h;
       if(l<minLow) minLow=l;
@@ -677,8 +983,8 @@ void PXM_RhProcessBar(const int b,const int hST,const int hRSI,const int hADX,co
    if(!PXM_RhSimulate(b,s,ap,entry,sl,tp1,tp2,result,win,tp1hit,maeATR,pnlR,barsRes)) return;
 
    PXM_Row r;
-   r.kind=1;
-   r.time=iTime(_Symbol,_Period,b);
+   r.kind=PXM_DB_SOURCE_REHEARSAL;
+   r.time=PXM_RhTime(b);
    r.dir=(int)s.dir;
    r.score=s.total; r.tier=s.tier;
    r.l1=s.l1; r.l2=s.l2; r.l3=s.l3; r.l4=s.l4; r.l5=s.l5; r.l6=s.l6; r.candle=s.candle;
@@ -687,8 +993,7 @@ void PXM_RhProcessBar(const int b,const int hST,const int hRSI,const int hADX,co
    r.entry=entry; r.sl=sl; r.tp1=tp1; r.tp2=tp2;
    r.result=result; r.win=win; r.tp1hit=tp1hit;
    r.maeATR=maeATR; r.pnlR=pnlR; r.barsRes=barsRes;
-   PXM_AppendRow(r);
-   g_pxmRhRows++;
+   if(PXM_AppendRow(r)) g_pxmRhRows++;
 }
 
 //+------------------------------------------------------------------+
@@ -697,12 +1002,14 @@ void PXM_RhProcessBar(const int b,const int hST,const int hRSI,const int hADX,co
 void PXM_RehearseStart(const PX_Preset &base)
 {
    if(!InpEnableAladin) return;
-   if(g_pxmFile<0) return;
+   if(g_pxmFile<0 || g_pxmAct.fellBack) return;
    if(g_pxmRhActive) return;
-   if(GlobalVariableCheck(PXM_GV("rehearseDone")) || g_pxmRhRowsLoaded>0)
+   bool done=PXM_RehearsalDoneDB();
+   if(g_pxmAct.fellBack) return;
+   if(done || g_pxmResolved>=PXM_MIN_SAMPLES)
    {
-      if(!GlobalVariableCheck(PXM_GV("rehearseDone"))) GlobalVariableSet(PXM_GV("rehearseDone"),1.0);
-      Print("PREDICT-X ALADIN: rehearsal already completed before - skipping (bank has ",g_pxmCount," rows).");
+      Print("PREDICT-X ALADIN: existing fresh database memory found - skipping first-run rehearsal (bank has ",g_pxmCount,
+            " rows, ",g_pxmResolved," resolved, ",g_pxmRhRowsLoaded," rehearsal rows).");
       return;
    }
    if(PXM_REHEARSE_BARS<=0) return;
@@ -720,11 +1027,12 @@ void PXM_RehearseStart(const PX_Preset &base)
    g_pxmRhStH2=iCustom(_Symbol,base.htf2,"PREDICT-X\\Indicators\\SuperTrend",base.stPeriod,base.stMultiplier);
    if(g_pxmRhStH2==INVALID_HANDLE) g_pxmRhStH2=iCustom(_Symbol,base.htf2,"SuperTrend",base.stPeriod,base.stMultiplier);
    if(g_pxmRhStH1==INVALID_HANDLE || g_pxmRhStH2==INVALID_HANDLE)
-      Print("PREDICT-X MEM: HTF SuperTrend handle unavailable - rehearsal HTF layer will score 0pts on this pass.");
+      Print("PREDICT-X ALADIN DB: HTF SuperTrend handle unavailable - rehearsal HTF layer will score 0pts on this pass.");
 
    g_pxmRhBMin=bMin;
    g_pxmRhCursor=bMax;
    g_pxmRhPrintPct=0;
+   g_pxmRhCacheBuilt=false;
    g_pxmRhActive=true;
    g_pxmRhTotal=bMax-bMin+1;
    g_pxmRhDone=0;
@@ -737,6 +1045,7 @@ void PXM_RehearseReleaseHandles()
 {
    if(g_pxmRhStH1!=INVALID_HANDLE) { IndicatorRelease(g_pxmRhStH1); g_pxmRhStH1=INVALID_HANDLE; }
    if(g_pxmRhStH2!=INVALID_HANDLE) { IndicatorRelease(g_pxmRhStH2); g_pxmRhStH2=INVALID_HANDLE; }
+   PXM_RhClearCache();
 }
 
 void PXM_RehearseFinish()
@@ -745,12 +1054,13 @@ void PXM_RehearseFinish()
    g_pxmRhActive=false;
    g_pxmRhDone=g_pxmRhTotal;
    PXM_RehearseReleaseHandles();
-   GlobalVariableSet(PXM_GV("rehearseDone"),1.0);
-   Print("PREDICT-X MEM: rehearsal finished - ",g_pxmRhRows," historical outcomes added, bank now ",g_pxmCount," rows / ",g_pxmResolved," resolved.");
+   PXM_SetRehearsalDoneDB();
+   if(g_pxmAct.fellBack) return;
+   Print("PREDICT-X ALADIN DB: rehearsal finished - ",g_pxmRhRows," historical outcomes added, bank now ",g_pxmCount," rows / ",g_pxmResolved," resolved.");
    ChartRedraw(0);
 }
 
-//--- single OnDeinit entry point: PXM_ objects, rehearsal handles, memory file
+//--- single OnDeinit entry point: PXM_ objects, rehearsal handles, memory database
 void PXM_OnDeinitCleanup()
 {
    PXM_DeleteObjects();
@@ -758,21 +1068,32 @@ void PXM_OnDeinitCleanup()
    PXM_Cleanup();
 }
 
-//--- called from OnTimer only. Never touches live scoring/trading state.
-void PXM_RehearsePump(const int hST,const int hRSI,const int hADX,const int hATR14,const int hATR100,const int hKC,const int hTTM,const PX_Preset &base)
+//--- called from OnTimer/live or tester fast-pump. Never touches live trading state.
+void PXM_RehearsePump(const int hST,const int hRSI,const int hADX,const int hATR14,const int hATR100,const int hKC,const int hTTM,const PX_Preset &base,const bool fastMode)
 {
-   if(!InpEnableAladin) return;
+   if(!InpEnableAladin || g_pxmAct.fellBack)
+   {
+      PXM_RehearseReleaseHandles();
+      return;
+   }
    if(!g_pxmRhActive)
    {
       // auto-(re)start when history finished loading after init
-      if(!GlobalVariableCheck(PXM_GV("rehearseDone")) && g_pxmFile>=0 && iBars(_Symbol,_Period)>PXM_SIM_BARS+30)
+      bool done=PXM_RehearsalDoneDB();
+      if(g_pxmAct.fellBack) return;
+      if(!done && g_pxmFile>=0 && iBars(_Symbol,_Period)>PXM_SIM_BARS+30)
          PXM_RehearseStart(base);
       if(!g_pxmRhActive) return;
    }
+   if(!g_pxmRhCacheBuilt)
+      PXM_RhBuildCache(g_pxmRhCursor,hST,hRSI,hADX,hATR14,hATR100,hKC,hTTM,base);
    long t0=(long)GetMicrosecondCount();
    int processed=0;
    int avail=iBars(_Symbol,_Period);
-   while(g_pxmRhActive && processed<PXM_REHEARSE_PER_PASS && ((long)GetMicrosecondCount()-t0)<PXM_RH_BUDGET_US)
+   int maxPerPass=(fastMode?PXM_RH_FAST_PER_PASS:PXM_REHEARSE_PER_PASS);
+   long budgetUS=(fastMode?PXM_RH_FAST_BUDGET_US:PXM_RH_BUDGET_US);
+   bool dbTxn=(g_pxmFile>=0?PXM_BeginDBTransaction():false);
+   while(g_pxmRhActive && processed<maxPerPass && ((long)GetMicrosecondCount()-t0)<budgetUS)
    {
       int b=g_pxmRhCursor;
       if(b<g_pxmRhBMin) break;
@@ -781,7 +1102,22 @@ void PXM_RehearsePump(const int hST,const int hRSI,const int hADX,const int hATR
       g_pxmRhCursor--;
       processed++;
       if(g_pxmRhCursor<g_pxmRhBMin) break;
-      if(((long)GetMicrosecondCount()-t0)>=PXM_RH_BUDGET_US) break;
+      if(((long)GetMicrosecondCount()-t0)>=budgetUS) break;
+   }
+   if(dbTxn)
+   {
+      if(g_pxmAct.fellBack)
+      {
+         PXM_RollbackDBTransaction();
+         PXM_RehearseReleaseHandles();
+         return;
+      }
+      if(!PXM_CommitDBTransaction())
+      {
+         PXM_MarkDBFailure("Aladin database commit failed - classic EA path.");
+         PXM_RehearseReleaseHandles();
+         return;
+      }
    }
    g_pxmRhDone+=processed;
    if(g_pxmRhTotal>0)
@@ -790,7 +1126,7 @@ void PXM_RehearsePump(const int hST,const int hRSI,const int hADX,const int hATR
       if(pct>=g_pxmRhPrintPct+25)
       {
          g_pxmRhPrintPct=pct;
-         Print("PREDICT-X MEM: rehearsal ",pct,"% (bank rows ",g_pxmCount,").");
+         Print("PREDICT-X ALADIN DB: rehearsal ",pct,"% (bank rows ",g_pxmCount,").");
       }
    }
    if(g_pxmRhCursor<g_pxmRhBMin) PXM_RehearseFinish();
