@@ -32,6 +32,8 @@ input bool             InpUseInitialStopLoss  = false;            // Use Initial
 input bool             InpEnableTradeProtection = true;           // Enable Trade Protection
 input double           InpProtectTriggerPctOfRisk = 1.0;          // Staircase: arm protection when floating P/L reaches this % of risk
 input double           InpProtectGivebackPct = 30.0;              // Staircase: in-bucket close when price gives back this % from peak
+input bool             InpTrailbackTo1_3 = true;                  // Trailback ON from trigger to 1/3 (true=on, false=off)
+input bool             InpTrailbackTo2_3 = true;                  // Trailback ON from 1/3 to 2/3 (true=on, false=off)
 input double           InpRiskPerTradePercent = 1.0;              // Risk Per Trade (%)
 input PX_TradingMode   InpTradingMode         = PX_MODE_NORMAL;   // Trading Mode
 input bool             InpAutoAdjustSettings  = true;             // Auto-Adjust Settings
@@ -720,7 +722,7 @@ void OnTick()
       // purely additive: PX_TM_ApplyStaircaseProtection and
       // PX_TM_ArmStaircaseIfReady are no-ops unless the staircase is armed.
       PX_TM_ArmStaircaseIfReady(g_tm,InpProtectTriggerPctOfRisk,g_setup.riskMoney);
-      PX_TM_ApplyStaircaseProtection(g_tm,InpProtectTriggerPctOfRisk,InpProtectGivebackPct);
+      PX_TM_ApplyStaircaseProtection(g_tm,InpProtectTriggerPctOfRisk,InpProtectGivebackPct,InpTrailbackTo1_3,InpTrailbackTo2_3);
    }
    datetime cur=iTime(_Symbol,_Period,0);
    if(InpShowPanel)

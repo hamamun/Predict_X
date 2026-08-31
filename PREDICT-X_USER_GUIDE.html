@@ -250,7 +250,8 @@ History OK — no change needed.</pre>
 <li>Once floating profit reaches <strong>1.0 × the trade's risk</strong> (Protect Trigger), the staircase arms.</li>
 <li>The distance from entry to TP1 is split into buckets: <strong>entry → 1/3 → 2/3 → 90% → TP1</strong>.</li>
 <li>Each time price enters a higher bucket, the stop is raised to that bucket's floor.</li>
-<li>Inside a bucket, the position closes early if price either <strong>touches the bucket floor</strong> or <strong>gives back 30%</strong> (Protect Giveback) of the bucket's favourable move from its peak.</li>
+<li>Inside a bucket, the position closes early if price either <strong>touches the bucket floor</strong> or — when trailback is on for that stage — <strong>gives back 30%</strong> (Protect Giveback) of the bucket's favourable move from its peak.</li>
+<li><strong>Trailback to 1/3</strong> and <strong>Trailback to 2/3</strong> default <strong>true</strong> (trail works). Set either to <strong>false</strong> to keep only the lock in that zone, with no giveback trail.</li>
 </ol>
 <p class="ok">Safety: this layer never closes a losing trade. If floating P/L is not positive, it does nothing and leaves the exit to the normal stop or early-lock logic.</p>
 <p class="small">The bucket floors are the same 1/3, 2/3 and 90% levels used by the early profit locks, so the two systems agree rather than fight each other. After TP1 the separate post-TP1 trail takes over.</p>
