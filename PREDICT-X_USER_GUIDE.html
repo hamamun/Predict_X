@@ -165,11 +165,12 @@ MQL5/Indicators/PREDICT-X/Indicators/KeltnerChannel.mq5</pre>
 <li><strong>Rehearsal.</strong> On first run the EA replays its own scoring over the last 3,000 closed bars and records how each simulated setup would have ended (SL, TP1, TP2, breakeven, or timeout), including the worst drawdown before the result.</li>
 <li><strong>Live logging.</strong> Every real signal, its planned entry / SL / TP1 / TP2, and its actual outcome are inserted or updated in the same bank continuously.</li>
 <li><strong>Fresh strict lookup.</strong> On each new signal the EA finds the <strong>50 most similar</strong> fresh past setups using the same symbol, same timeframe, same direction and same current feature version. It does <strong>not</strong> fall back to stale or different-timeframe data.</li>
-<li><strong>Rolling cleanup.</strong> Rows older than the 180-day freshness window are ignored and pruned. The bank keeps the newest 20,000 rows per symbol/timeframe and down-weights rows after the first 30 days, so newer market behavior matters more.</li>
+<li><strong>Rolling cleanup.</strong> On each closed bar of that chart, old rows are removed from <em>that</em> file only (180-day window, newest 20,000). Rows are down-weighted after the first 30 days.</li>
 </ol>
-<p>Memory lives in one persistent SQLite database in MT5 Terminal Common Files:</p>
-<pre>Terminal/Common/Files/PREDICTX_ALADIN_MEMORY.sqlite</pre>
-<p class="small">Strategy Tester uses a separate <code>PREDICTX_ALADIN_MEMORY_TESTER.sqlite</code> file so test/optimization learning cannot contaminate live learning. Deleting the database resets Aladin memory and causes a fresh rehearsal.</p>
+<p>Memory lives in <strong>one SQLite file per symbol and timeframe</strong> in MT5 Terminal Common Files, for example:</p>
+<pre>Terminal/Common/Files/PREDICTX_ALADIN_MEMORY_XAUUSD_M15.sqlite
+Terminal/Common/Files/PREDICTX_ALADIN_MEMORY_EURUSD_M5.sqlite</pre>
+<p class="small">Charts never share a database lock. Strategy Tester uses a <code>_TESTER_</code> prefix so tests cannot contaminate live learning. Deleting that symbol/timeframe file resets Aladin for that chart and causes a fresh rehearsal.</p>
 
 <h3>The FUTURE VIEW panel block</h3>
 <p>Shows the verdict for the current bar, for example:</p>
@@ -210,10 +211,7 @@ History OK — no change needed.</pre>
 </div>
 
 <h2>9. Broker-Aware TP / SL</h2>
-<div class="card">
-<p>Levels are adjusted to satisfy your broker's stop and freeze distance rules:</p>
-<ul>
-<li>BUY TP must sit above the minimum broker distance; SELL TP below it.</li>
+<div ve the minimum broker distance; SELL TP below it.</li>
 <li>BUY SL must sit below it, SELL SL above it — when an initial SL is used.</li>
 <li>If the adjustment wrecks the reward-to-risk ratio, the setup is rejected outright.</li>
 </ul>
@@ -346,5 +344,8 @@ History OK — no change needed.</pre>
 </div>
 
 <p class="small">PREDICT-X v2.00 user guide. Keep this file with the EA package when moving to another PC. Trading involves risk; nothing in this guide is financial advice.</p>
+
+</div></body></html>
+ackage when moving to another PC. Trading involves risk; nothing in this guide is financial advice.</p>
 
 </div></body></html>
