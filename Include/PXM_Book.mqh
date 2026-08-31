@@ -252,12 +252,23 @@ string PXM_GV(const string suffix)
    return "PREDICTX.MEM."+_Symbol+"."+PX_TFToString(_Period)+"."+suffix;
 }
 
+string PXM_FileSafe(string s)
+{
+   StringReplace(s,".","_");
+   StringReplace(s,"/","_");
+   StringReplace(s,"\\","_");
+   StringReplace(s,":","_");
+   StringReplace(s," ","_");
+   StringReplace(s,"-","_");
+   return s;
+}
+
 string PXM_FileName()
 {
-   // One persistent SQLite database for all live symbols/timeframes. Tester uses
-   // a separate file so optimization/backtest runs cannot pollute live learning.
+   // One SQLite file per symbol + timeframe. Charts never share a lock.
+   // Tester uses a separate prefix so tests cannot pollute live learning.
    string suffix=((bool)MQLInfoInteger(MQL_TESTER)?"_TESTER":"");
-   return "PREDICTX_ALADIN_MEMORY"+suffix+".sqlite";
+   return "PREDICTX_ALADIN_MEMORY"+suffix+"_"+PXM_FileSafe(_Symbol)+"_"+PX_TFToString(_Period)+".sqlite";
 }
 
 // Pending live-outcome tracker persistence remains in terminal global variables
@@ -318,12 +329,18 @@ string PXM_SQLTF(){ return PXM_SQLText(PX_TFToString(_Period)); }
 bool PXM_DBExec(const string sql,const string context="")
 {
    if(g_pxmFile<0) return false;
-   ResetLastError();
-   if(DatabaseExecute(g_pxmFile,sql)) return true;
-   int err=GetLastError();
-   g_pxmErr++;
-   if(g_pxmErr<=5)
-      Print("PREDICT-X ALADIN DB: ",(context!=""?context:"SQL")," failed err=",err," sql=",sql);
+   for(int attempt=0; attempt<4; attempt++)
+   {
+      ResetLastError();
+      if(DatabaseExecute(g_pxmFile,sql)) return true;
+      int err=GetLastError();
+      // 5601/5 = typical SQLite busy/locked. Retry; do not treat the first clash as death.
+      if(attempt<3) { Sleep(40+attempt*40); continue; }
+      g_pxmErr++;
+      if(g_pxmErr<=5)
+         Print("PREDICT-X ALADIN DB: ",(context!=""?context:"SQL")," failed err=",err," sql=",sql);
+      return false;
+   }
    return false;
 }
 
@@ -344,7 +361,7 @@ bool PXM_EnsureDB()
    // rejects either one.
    DatabaseExecute(g_pxmFile,"PRAGMA journal_mode=WAL");
    DatabaseExecute(g_pxmFile,"PRAGMA synchronous=NORMAL");
-   DatabaseExecute(g_pxmFile,"PRAGMA busy_timeout=3000");
+   DatabaseExecute(g_pxmFile,"PRAGMA busy_timeout=8000");
 
    bool ok=true;
    ok=(PXM_DBExec(
@@ -845,11 +862,7 @@ bool PXM_AppendRow(const PXM_Row &r)
    if(r.kind==PXM_DB_SOURCE_REHEARSAL) g_pxmRhRowsLoaded++;
    if(r.result>=PXM_RESULT_SL && r.result<=PXM_RESULT_BE) g_pxmResolved++;
    PXM_TrimMemoryIfNeeded();
-   if(!PXM_PruneDB(false))
-   {
-      PXM_MarkDBFailure("Aladin database cleanup failed - classic EA path.");
-      return false;
-   }
+   // Old-row cleanup runs on this chart's closed bar, not after every insert.
    return true;
 }
 
@@ -861,6 +874,13 @@ bool PXM_AppendUpdate(const datetime time,const int dir,const double entry,const
 {
    if(g_pxmFile<0) return false;
    if(time<PXM_CutoffTime() || time>PXM_Now()) return false;
+   // Missing live row is not a database crash (signal never logged). Skip, stay healthy.
+   if(!PXM_LiveRowExistsDB(time,dir))
+   {
+      if(g_pxmErr<=5)
+         Print("PREDICT-X ALADIN DB: no live row to update for ",_Symbol," ",PX_TFToString(_Period)," @ ",TimeToString(time,TIME_DATE|TIME_MINUTES));
+      return false;
+   }
    if(!PXM_UpdateLiveRowDB(time,dir,entry,sl,tp1,tp2,result,win,tp1hit,maeATR,pnlR,barsRes))
    {
       PXM_MarkDBFailure("Aladin database update failed - classic EA path.");
@@ -880,11 +900,6 @@ bool PXM_AppendUpdate(const datetime time,const int dir,const double entry,const
          if(wasRes && !nowRes) g_pxmResolved--;
          break;
       }
-   }
-   if(!PXM_PruneDB(false))
-   {
-      PXM_MarkDBFailure("Aladin database cleanup failed - classic EA path.");
-      return false;
    }
    return true;
 }
@@ -1215,10 +1230,11 @@ void PX_FutureViewCheck(const PX_Lifecycle &lc,const bool newSignal,const PX_Sco
       g_pxmPendActive=false;
       PXM_SavePendGV();
    }
-   if(!PXM_PruneDB(false))
+   // This chart's bar close: drop stale/excess rows from THIS symbol+TF file only.
+   if(!PXM_PruneDB(true))
    {
-      PXM_MarkDBFailure("Aladin database cleanup failed - classic EA path.");
-      return;
+      Print("PREDICT-X ALADIN DB: bar-close prune skipped (busy) for ",_Symbol," ",PX_TFToString(_Period));
+      // Do not kill Aladin for a busy prune; lookup still uses in-memory rows.
    }
 
    // 1) settle unfinished live trackers

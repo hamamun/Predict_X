@@ -776,7 +776,7 @@ void PX_TM_ApplyPostTP1GivebackTrail(PX_TradeManagerState &tm)
 //| and we pre-check that the position's floating P/L is positive so  |
 //| this layer can never close a losing trade.                        |
 //+------------------------------------------------------------------+
-void PX_TM_ApplyStaircaseProtection(PX_TradeManagerState &tm,double triggerPctOfRisk,double givebackPct)
+void PX_TM_ApplyStaircaseProtection(PX_TradeManagerState &tm,double triggerPctOfRisk,double givebackPct,bool trailbackTo1_3=true,bool trailbackTo2_3=true)
 {
    // Hard guards: any one of these makes the function a complete no-op.
    if(triggerPctOfRisk<=0.0 || givebackPct<=0.0) return;
@@ -881,15 +881,23 @@ void PX_TM_ApplyStaircaseProtection(PX_TradeManagerState &tm,double triggerPctOf
    if(tm.bucketPeak>0.0 && tm.bucketEntry>0.0)
       givebackDist=MathAbs(tm.bucketPeak-tm.bucketEntry)*givebackPct/100.0;
 
+   // Trailback (giveback close) is optional per stage:
+   //   bucket 0 = trigger → 1/3  (InpTrailbackTo1_3)
+   //   bucket 1 = 1/3 → 2/3      (InpTrailbackTo2_3)
+   // Locks still apply. Later buckets keep giveback as before.
+   bool trailOn=true;
+   if(bucket==0) trailOn=trailbackTo1_3;
+   else if(bucket==1) trailOn=trailbackTo2_3;
+
    if(buy)
    {
       if(tm.currentLock>0.0 && price<=tm.currentLock) touchedLock=true;
-      if(tm.bucketPeak>0.0 && givebackDist>0.0 && price<=tm.bucketPeak-givebackDist) gaveBack=true;
+      if(trailOn && tm.bucketPeak>0.0 && givebackDist>0.0 && price<=tm.bucketPeak-givebackDist) gaveBack=true;
    }
    else
    {
       if(tm.currentLock>0.0 && price>=tm.currentLock) touchedLock=true;
-      if(tm.bucketPeak>0.0 && givebackDist>0.0 && price>=tm.bucketPeak+givebackDist) gaveBack=true;
+      if(trailOn && tm.bucketPeak>0.0 && givebackDist>0.0 && price>=tm.bucketPeak+givebackDist) gaveBack=true;
    }
 
    if(touchedLock || gaveBack)
